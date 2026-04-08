@@ -105,18 +105,29 @@ export interface RebateSummary {
   maxFee: number;
 }
 
-// Real grid_profit, computed by FIFO matching every fill in fills_archive.
-// Replaces the legacy bot.grid_profit_usdt column. Every value comes from
-// real GRVT fill data — no estimation.
+// Real grid_profit, computed by spread-pairing every fill in fills_archive
+// (filtered to post-bot-creation). Same algorithm the engine uses for
+// bot.grid_profit_usdt, but operating over the FULL backfilled history
+// instead of just the last ~430 fills GRVT exposes per request.
+//
+// Why spread-pair instead of FIFO: a grid bot opens 93 simultaneous
+// positions at different price levels — FIFO over the flat fill stream
+// would falsely match a $1800 buy against a $2240 sell (+$440/ETH that
+// never actually happened). Spread-pair only matches buys & sells whose
+// price difference is within one grid spacing window.
+//
+// Why not equity-minus-investment: bot.investment_usdt is bumped by
+// compound rebalances AND by external margin transfers, so it doesn't
+// reflect original cash deposited.
 export interface RealizedSummary {
-  realizedPnl: number;   // Σ (sell_price - buy_price) * matched_size
-  totalFees: number;     // signed; negative = net rebate earned
-  netPnl: number;        // realizedPnl - totalFees (rebates increase net)
-  roundTrips: number;    // FIFO match count (a single SELL can produce many)
-  avgPerRT: number;
+  gridProfit: number;       // gross trade-pair profit
+  totalFees: number;        // signed; negative = net rebate earned
+  netGridProfit: number;    // gridProfit - totalFees (rebates increase net)
+  pairs: number;            // matched grid round trips
+  avgPerPair: number;
   fillCount: number;
-  openSize: number;      // unmatched BUY lot size = currently open position
-  openCost: number;      // USDT spent on those open lots
+  unpairedBuys: number;     // open BUY lots (≈ current position)
+  unpairedSells: number;    // SELLs without matching BUY (data gap warning)
   firstFillAt: string | null;
   lastFillAt: string | null;
 }

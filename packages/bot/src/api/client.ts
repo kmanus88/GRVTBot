@@ -440,18 +440,48 @@ export class GRVTClient {
   }
 
   /**
-   * Obtener historial de fills (últimas N transacciones)
+   * Obtener historial de fills (últimas N transacciones).
+   *
+   * `endTimeNs` is optional and lets a caller page backwards: pass the
+   * oldest event_time of a previous batch to get fills strictly older
+   * than that. GRVT returns fills ordered newest→oldest, so the typical
+   * backfill loop is:
+   *
+   *   const all = [];
+   *   let endTime: string | undefined = undefined;
+   *   while (true) {
+   *     const batch = await getFillHistory(1000, instrument, endTime);
+   *     if (batch.length === 0) break;
+   *     all.push(...batch);
+   *     const oldest = batch[batch.length - 1];
+   *     // Subtract 1 ns so the next batch is strictly before this one,
+   *     // avoiding an infinite loop on the boundary fill.
+   *     endTime = (BigInt(oldest.event_time) - 1n).toString();
+   *     if (batch.length < 1000) break;  // last page
+   *   }
+   *
+   * If GRVT silently ignores `end_time`, the loop will see the same
+   * batch again and INSERT OR IGNORE in fills_archive will be a no-op,
+   * but the loop will spin — the caller is responsible for an
+   * iteration cap.
    */
-  async getFillHistory(limit: number = 100, instrument?: string): Promise<Fill[]> {
+  async getFillHistory(
+    limit: number = 100,
+    instrument?: string,
+    endTimeNs?: string
+  ): Promise<Fill[]> {
     await rateLimiter.waitIfNeeded();
-    
+
     const body: any = {
       sub_account_id: this.tradingAccountId,
       limit: Math.min(limit, 1000)
     };
-    
+
     if (instrument) {
       body.instrument = instrument;
+    }
+    if (endTimeNs) {
+      body.end_time = endTimeNs;
     }
 
     const data = await authenticatedRequest(`${TRADING_URL}/fill_history`, body);

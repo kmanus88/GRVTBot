@@ -808,58 +808,74 @@ export class GridEngine extends EventEmitter {
   private async checkCompoundRebalance(): Promise<void> {
     try {
       const bots = await db.getAllBots();
-      
+
       for (const bot of bots) {
         if (bot.status !== 'running') continue;
-        
+
         // Read compound settings from DB columns (NOT params_json)
         const pct = (bot as any).compound_pct || 0;
         const threshold = (bot as any).compound_threshold_usdt || 100;
         const intervalHours = (bot as any).compound_interval_hours || 168;
         const lastCompoundAt = (bot as any).last_compound_at;
-        
+
         if (pct <= 0) continue; // Compound disabled
-        
+
         // Check if enough time has passed since last compound
         if (lastCompoundAt) {
           const hoursSince = (Date.now() - new Date(lastCompoundAt).getTime()) / (1000 * 60 * 60);
           if (hoursSince < intervalHours) continue;
         }
-        
-        // Get REAL profit from GRVT balance (source of truth)
-        let gridProfit = 0;
-        try {
-          const { authenticatedRequest } = await import('../api/auth.js');
-          const summary = await authenticatedRequest('https://trades.grvt.io/full/v1/account_summary', { sub_account_id: '3931648923440974' });
-          const balance = parseFloat(summary.spot_balances?.[0]?.balance || '0');
-          gridProfit = balance - bot.investment_usdt;
-        } catch (e) {
-          console.log(`⚠️ Compound: Could not fetch GRVT balance, skipping`);
+
+        // ── GET REAL GRID PROFIT (NOT BALANCE DIFF) ─────────────────
+        // The previous implementation did `balance - investment_usdt`
+        // which catastrophically conflates real grid profit with any
+        // external margin transferred into the sub-account: every
+        // dollar the user moved in via funding→trading was treated as
+        // bot profit and reinvested. We now use the bot's own
+        // `grid_profit_usdt` (live, computed from spread-paired fills
+        // — see calculateRealGridProfit) which is independent of
+        // balance changes and only counts actual round-trip earnings.
+        //
+        // We then SUBTRACT the cumulative compound amount already
+        // taken so the same profit isn't compounded twice.
+        const gridProfitTotal = bot.grid_profit_usdt ?? 0;
+
+        const compoundedSoFarRow = await db.getCompoundedTotal(bot.id);
+        const alreadyCompounded = compoundedSoFarRow ?? 0;
+
+        const availableProfit = gridProfitTotal - alreadyCompounded;
+
+        if (availableProfit < threshold) {
+          console.log(`📊 Compound check bot ${bot.id}: available profit $${availableProfit.toFixed(2)} < threshold $${threshold} — skipping`);
           continue;
         }
-        
-        if (gridProfit < threshold) {
-          console.log(`📊 Compound check bot ${bot.id}: profit $${gridProfit.toFixed(2)} < threshold $${threshold} — skipping`);
-          continue;
-        }
-        
-        // Calculate compound amount
-        const compoundAmount = gridProfit * (pct / 100);
+
+        // Calculate compound amount from REAL grid profit only.
+        const compoundAmount = availableProfit * (pct / 100);
         const newInvestment = bot.investment_usdt + compoundAmount;
-        
-        console.log(`🔄 Compounding bot ${bot.id}: +$${compoundAmount.toFixed(2)} (${pct}% of $${gridProfit.toFixed(2)} profit)`);
-        
+
+        console.log(`🔄 Compounding bot ${bot.id}: +$${compoundAmount.toFixed(2)} (${pct}% of $${availableProfit.toFixed(2)} available grid profit; lifetime: $${gridProfitTotal.toFixed(2)}, prev compounded: $${alreadyCompounded.toFixed(2)})`);
+
         // SAFE: Only update investment_usdt and last_compound_at in DB
         // NO pauseBot, NO startBot, NO recalculating grid levels
         // Monitor reads investment_usdt each cycle and uses dynamic qty for new orders
-        await db.updateBot(bot.id, { 
+        await db.updateBot(bot.id, {
           investment_usdt: newInvestment,
           last_compound_at: new Date().toISOString()
         } as any);
-        
+
+        // Log the movement so /realized-summary and the dashboard can
+        // always reconstruct the cash flow trail.
+        await db.recordCashMovement({
+          bot_id: bot.id,
+          type: 'compound',
+          amount_usdt: compoundAmount,
+          notes: `${pct}% of $${availableProfit.toFixed(2)} grid profit (lifetime $${gridProfitTotal.toFixed(2)})`,
+        });
+
         console.log(`✅ Bot ${bot.id} compuesto: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}`);
       }
-      
+
     } catch (error) {
       console.error(`❌ Error en compound rebalance:`, error);
     }

@@ -19,6 +19,14 @@ import { cache } from './cache.js';
 const log = childLogger('v2-router');
 
 // ─── Types ─────────────────────────────────────────────────────────────
+interface RawFill {
+  event_time?: string;
+  is_buyer?: boolean | number;
+  price?: string;
+  size?: string;
+  fee?: string;
+}
+
 interface GrvtClient {
   getInstruments(): Promise<unknown[]>;
   getBalance(): Promise<unknown>;
@@ -26,6 +34,7 @@ interface GrvtClient {
   getPosition(instrument: string): Promise<unknown>;
   getOpenOrders(instrument?: string): Promise<unknown[]>;
   getKlines(instrument: string, interval?: string, limit?: number): Promise<unknown[]>;
+  getFillHistory(limit: number, instrument?: string, endTimeNs?: string): Promise<RawFill[]>;
 }
 
 // Structural type for the engine operations the router needs.
@@ -71,6 +80,19 @@ function dbGet<T = unknown>(db: Database.Database, sql: string, params: unknown[
     db.get(sql, params, (err, row) => {
       if (err) reject(err);
       else resolve(row as T | undefined);
+    });
+  });
+}
+
+function dbRun(
+  db: Database.Database,
+  sql: string,
+  params: unknown[] = []
+): Promise<{ changes: number; lastID: number }> {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (this: { changes: number; lastID: number }, err) {
+      if (err) reject(err);
+      else resolve({ changes: this.changes, lastID: this.lastID });
     });
   });
 }
@@ -382,7 +404,47 @@ export function createV2Router(deps: V2RouterDeps): Router {
   router.get('/bots/:id/realized-summary', asyncHandler(async (req, res) => {
     const id = parseInt(String(req.params.id ?? ''), 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid bot id' });
-    void id; // fills_archive is global in v0; ignored until multi-bot migration
+
+    // ── WHY THIS METHOD ────────────────────────────────────────────
+    // For a grid bot, "realized PnL" is NOT computable from balance
+    // math (equity - investment - unrealized) because:
+    //   1. compound rebalances inflate `bot.investment_usdt` over
+    //      time — the column stores the current notional, not the
+    //      original cash deposit
+    //   2. the user may transfer funds in/out of the sub-account
+    //      manually for additional margin
+    // Both of those make `current_equity - investment_usdt` meaningless.
+    //
+    // It's also NOT computable by FIFO over the flat fill stream:
+    //   FIFO would match a BUY at $1800 against an unrelated SELL at
+    //   $2240, reporting +$440/ETH profit that NEVER actually happened
+    //   (that buy was sold against ITS own grid level for +$7).
+    //
+    // The CORRECT method for a grid bot: pair each SELL with the
+    // closest unmatched BUY whose price is lower by *roughly one
+    // grid spacing* — that's a real grid round trip. This is what
+    // the engine's calculateRealGridProfit() already does on the
+    // last ~1000 fills; we now do it over the FULL backfilled
+    // fills_archive (post-bot-creation only), so the lifetime
+    // number includes everything since the bot was provisioned —
+    // including profits that have already been compounded into
+    // investment_usdt.
+    //
+    // Spread window: $3 < spread < $20. Bot 42 has 6.99 USDT spacing,
+    // so adjacent-level pairs land in (6, 8); the wider window
+    // tolerates dust from non-adjacent pairs without admitting
+    // cross-grid noise.
+
+    const bot = await dbGet<{ created_at: string }>(db, `
+      SELECT created_at FROM grid_bots WHERE id = ?
+    `, [id]);
+    if (!bot) return res.status(404).json({ error: 'bot not found' });
+
+    // SQLite stores created_at as ISO 'YYYY-MM-DD HH:MM:SS' UTC (no zone
+    // marker). Convert to nanoseconds to filter event_time, which is
+    // GRVT's nanosecond-string format.
+    const createdAtMs = Date.parse(bot.created_at + 'Z');
+    const createdAtNs = (BigInt(createdAtMs) * 1_000_000n).toString();
 
     const fills = await dbAll<{
       is_buyer: number;
@@ -393,64 +455,176 @@ export function createV2Router(deps: V2RouterDeps): Router {
     }>(db, `
       SELECT is_buyer, price, size, fee, event_time
       FROM fills_archive
+      WHERE event_time >= ?
       ORDER BY event_time ASC
-    `);
+    `, [createdAtNs]);
 
     if (fills.length === 0) {
       res.json({
-        realizedPnl: 0,
+        gridProfit: 0,
         totalFees: 0,
-        netPnl: 0,
-        roundTrips: 0,
-        avgPerRT: 0,
+        netGridProfit: 0,
+        pairs: 0,
+        avgPerPair: 0,
         fillCount: 0,
-        openSize: 0,
-        openCost: 0,
+        unpairedBuys: 0,
+        unpairedSells: 0,
         firstFillAt: null,
         lastFillAt: null,
       });
       return;
     }
 
-    // FIFO: walk fills oldest→newest, queue BUY lots, consume on SELL.
-    const lots: Array<{ price: number; qty: number }> = [];
-    let realizedPnl = 0;
+    // Walk fills chronologically, maintain a queue of pending buys.
+    // For each sell, find the BEST matching pending buy:
+    //   - spread > MIN_SPREAD (excludes wash / re-entry / sub-grid noise)
+    //   - spread < MAX_SPREAD (excludes cross-grid mismatches)
+    //   - prefer the smallest valid spread (closest to grid spacing)
+    const MIN_SPREAD = 3;
+    const MAX_SPREAD = 20;
+
+    const pendingBuys: Array<{ price: number; size: number }> = [];
+    let gridProfit = 0;
     let totalFees = 0;
-    let roundTrips = 0;
-    const EPS = 1e-9;
+    let pairs = 0;
+    let unpairedSells = 0;
 
     for (const f of fills) {
       totalFees += f.fee;
       if (f.is_buyer === 1) {
-        lots.push({ price: f.price, qty: f.size });
+        pendingBuys.push({ price: f.price, size: f.size });
         continue;
       }
-      let remaining = f.size;
-      while (remaining > EPS && lots.length > 0) {
-        const lot = lots[0]!;
-        const matched = Math.min(lot.qty, remaining);
-        realizedPnl += (f.price - lot.price) * matched;
-        roundTrips++;
-        lot.qty -= matched;
-        remaining -= matched;
-        if (lot.qty <= EPS) lots.shift();
+      let bestIdx = -1;
+      let bestSpread = Infinity;
+      for (let i = 0; i < pendingBuys.length; i++) {
+        const b = pendingBuys[i]!;
+        const spread = f.price - b.price;
+        if (spread > MIN_SPREAD && spread < MAX_SPREAD && spread < bestSpread) {
+          bestIdx = i;
+          bestSpread = spread;
+        }
+      }
+      if (bestIdx >= 0) {
+        const b = pendingBuys[bestIdx]!;
+        gridProfit += (f.price - b.price) * f.size;
+        pairs++;
+        pendingBuys.splice(bestIdx, 1);
+      } else {
+        unpairedSells++;
       }
     }
 
-    const openSize = lots.reduce((acc, l) => acc + l.qty, 0);
-    const openCost = lots.reduce((acc, l) => acc + l.qty * l.price, 0);
-
     res.json({
-      realizedPnl,
-      totalFees,
-      netPnl: realizedPnl - totalFees,
-      roundTrips,
-      avgPerRT: roundTrips > 0 ? realizedPnl / roundTrips : 0,
+      gridProfit,                              // gross trade-pair profit
+      totalFees,                               // signed; negative = rebate
+      netGridProfit: gridProfit - totalFees,   // grid profit AFTER fees
+      pairs,                                   // matched grid round trips
+      avgPerPair: pairs > 0 ? gridProfit / pairs : 0,
       fillCount: fills.length,
-      openSize,
-      openCost,
+      unpairedBuys: pendingBuys.length,        // open position from unmatched buys
+      unpairedSells,                           // sells we couldn't pair (data gaps)
       firstFillAt: fills[0]!.event_time,
       lastFillAt: fills[fills.length - 1]!.event_time,
+    });
+    return;
+  }));
+
+  // ── POST /api/v2/admin/backfill-fills ─────────────────────────────
+  // One-shot backfill: pages getFillHistory backwards using end_time
+  // until either GRVT returns nothing, the script hits maxBatches, or
+  // it observes a stall (same oldest fill twice in a row, which means
+  // GRVT is ignoring end_time and we'd loop forever).
+  //
+  // Idempotent — every fill goes through INSERT OR IGNORE on
+  // (event_time) so re-running is safe and a no-op once everything
+  // is already in fills_archive.
+  //
+  // Returns counts for the operator to verify how much new data was
+  // recovered. Triggered manually via curl with X-Api-Key.
+  router.post('/admin/backfill-fills', asyncHandler(async (req, res) => {
+    const maxBatches = Math.min(
+      parseInt(String(req.query.maxBatches ?? '20'), 10) || 20,
+      50
+    );
+    const instrument = String(req.query.instrument ?? 'ETH_USDT_Perp');
+    const t0 = Date.now();
+
+    let totalFetched = 0;
+    let totalInserted = 0;
+    let batches = 0;
+    let endTime: string | undefined = undefined;
+    let lastOldest: string | null = null;
+    let stalled = false;
+
+    while (batches < maxBatches) {
+      const batch = await grvtClient.getFillHistory(1000, instrument, endTime);
+      batches++;
+      if (batch.length === 0) break;
+
+      const oldest = batch[batch.length - 1];
+      if (!oldest) break;
+
+      // Stall detection: if GRVT silently ignores end_time, we'll see
+      // the same oldest event_time twice in a row.
+      if (lastOldest !== null && lastOldest === String(oldest.event_time)) {
+        stalled = true;
+        break;
+      }
+      lastOldest = String(oldest.event_time);
+
+      for (const f of batch) {
+        const eventTime = String(f.event_time ?? '');
+        if (!eventTime) continue;
+        totalFetched++;
+        const result = await dbRun(db, `
+          INSERT OR IGNORE INTO fills_archive
+            (fill_id, event_time, is_buyer, price, size, fee, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [
+          eventTime,
+          eventTime,
+          f.is_buyer ? 1 : 0,
+          parseFloat(f.price ?? '0'),
+          parseFloat(f.size ?? '0'),
+          parseFloat(f.fee ?? '0'),
+          new Date(Number(eventTime) / 1_000_000).toISOString(),
+        ]);
+        if ((result?.changes ?? 0) > 0) totalInserted++;
+      }
+
+      // Subtract 1 ns so the next batch is strictly older.
+      // We do NOT break on `batch.length < 1000` because GRVT's
+      // fill_history endpoint silently caps each call at ~430 fills
+      // even when limit=1000. We rely on the empty-batch and stall
+      // detection to terminate instead.
+      const oldestEventTime = String(oldest.event_time ?? '');
+      if (!oldestEventTime) break;
+      endTime = (BigInt(oldestEventTime) - 1n).toString();
+    }
+
+    const after = await dbGet<{
+      count: number;
+      sum_fee: number;
+      min_fee: number;
+      max_fee: number;
+    }>(db, `
+      SELECT COUNT(*) AS count,
+             COALESCE(SUM(fee), 0) AS sum_fee,
+             MIN(fee) AS min_fee,
+             MAX(fee) AS max_fee
+      FROM fills_archive
+    `);
+    res.json({
+      ok: true,
+      instrument,
+      batches,
+      maxBatches,
+      stalled,
+      totalFetched,
+      totalInserted,
+      durationMs: Date.now() - t0,
+      fillArchiveAfter: after,
     });
     return;
   }));

@@ -38,10 +38,12 @@ export function OverviewPage() {
     staleTime: 5_000,
   });
 
-  // Real realized PnL via FIFO matching of fills_archive. Replaces the
-  // legacy bot.grid_profit_usdt (frozen since March). Single-bot in v0,
-  // so the global summary IS the realized for bot 42; when multi-bot
-  // lands we'll need a per-bot variant.
+  // Real lifetime grid profit via spread-pair matching of fills_archive
+  // (post bot.created_at). Same algorithm the engine's
+  // calculateRealGridProfit() uses, but operating over the FULL
+  // backfilled fill history instead of just the last ~430 fills.
+  // Decoupled from compound rebalances and external margin transfers
+  // because it only counts trade pairs, not balance changes.
   const realizedQuery = useQuery({
     queryKey: ['realized-summary', 42],
     queryFn: () => api.getRealizedSummary(42),
@@ -108,7 +110,7 @@ export function OverviewPage() {
   }
 
   const totalRealized =
-    realizedQuery.data?.netPnl ??
+    realizedQuery.data?.netGridProfit ??
     bots.reduce((acc, b) => acc + b.grid_profit_usdt, 0);
   const totalPnl = totalRealized + totalUnrealized;
   const totalEquity = totalInvested + totalPnl;

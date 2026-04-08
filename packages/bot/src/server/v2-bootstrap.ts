@@ -28,6 +28,13 @@ interface GrvtClient {
   getPosition(instrument: string): Promise<unknown>;
   getOpenOrders(instrument?: string): Promise<unknown[]>;
   getKlines(instrument: string, interval?: string, limit?: number): Promise<unknown[]>;
+  getFillHistory(limit: number, instrument?: string, endTimeNs?: string): Promise<Array<{
+    event_time?: string;
+    is_buyer?: boolean | number;
+    price?: string;
+    size?: string;
+    fee?: string;
+  }>>;
 }
 
 // Structural type for the engine ops the router needs (mutations).

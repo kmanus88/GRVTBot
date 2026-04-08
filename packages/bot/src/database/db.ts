@@ -224,6 +224,49 @@ export class GridBotDB {
       // Columna ya existe, ignorar error
     }
 
+    // Migration: original_investment_usdt — the cash deposit at bot
+    // creation, immutable. Required because investment_usdt gets bumped
+    // by compound rebalances AND by external margin transfers, so it
+    // no longer reflects the original deposit. New bots set this on
+    // INSERT; for legacy bots we backfill = current investment_usdt
+    // (best guess; the user can manually correct individual rows).
+    try {
+      await this.dbRun(`ALTER TABLE grid_bots ADD COLUMN original_investment_usdt REAL`);
+      console.log('✅ Columna original_investment_usdt agregada a grid_bots');
+    } catch (e) {
+      // Columna ya existe, ignorar
+    }
+    // Backfill NULL rows so the column has data for existing bots.
+    await this.dbRun(`
+      UPDATE grid_bots
+      SET original_investment_usdt = investment_usdt
+      WHERE original_investment_usdt IS NULL
+    `);
+
+    // Tabla: bot_cash_movements — explicit ledger for every cash flow
+    // touching a bot's notional. Each row records WHY investment_usdt
+    // changed: 'compound' when the engine reinvested grid profit,
+    // 'deposit' when external margin was transferred in, 'withdrawal'
+    // when funds were pulled out. New bots populate this from day 1
+    // so we can always reconstruct: original_investment + sum(deposits)
+    // + sum(compounds) - sum(withdrawals) = current_notional, with
+    // every component accounted for.
+    await this.dbRun(`
+      CREATE TABLE IF NOT EXISTS bot_cash_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id INTEGER NOT NULL REFERENCES grid_bots(id) ON DELETE CASCADE,
+        type TEXT NOT NULL CHECK (type IN ('compound', 'deposit', 'withdrawal', 'initial')),
+        amount_usdt REAL NOT NULL,
+        notes TEXT,
+        occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await this.dbRun(`
+      CREATE INDEX IF NOT EXISTS idx_cash_movements_bot
+        ON bot_cash_movements(bot_id, occurred_at)
+    `);
+
     // Tabla: orders
     await this.dbRun(`
       CREATE TABLE IF NOT EXISTS orders (
@@ -342,9 +385,13 @@ export class GridBotDB {
    * Crear nuevo grid bot
    */
   async createBot(params: Omit<GridBot, 'id' | 'created_at' | 'updated_at'>): Promise<number> {
+    // Set original_investment_usdt = investment_usdt at creation. After
+    // this point, investment_usdt may drift (compound, manual edits) but
+    // the original is immutable so we always know the real cash deposit.
     const values = [
       params.pair, params.direction, params.leverage, params.lower_price,
       params.upper_price, params.num_grids, params.investment_usdt,
+      params.investment_usdt,  // original_investment_usdt = investment_usdt
       params.grid_profit_usdt, params.trend_pnl_usdt, params.total_pnl_usdt,
       params.status, params.position_size, params.avg_entry_price,
       params.liquidation_price, params.params_json
@@ -352,14 +399,80 @@ export class GridBotDB {
     const sql = `
       INSERT INTO grid_bots (
         pair, direction, leverage, lower_price, upper_price, num_grids,
-        investment_usdt, grid_profit_usdt, trend_pnl_usdt, total_pnl_usdt,
+        investment_usdt, original_investment_usdt,
+        grid_profit_usdt, trend_pnl_usdt, total_pnl_usdt,
         status, position_size, avg_entry_price, liquidation_price, params_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
-    
+
     await this.dbRun(sql, values);
     const row = await this.dbGet('SELECT last_insert_rowid() as id');
-    return row.id;
+    const botId = row.id as number;
+
+    // Seed the cash-movements ledger with the initial deposit so the
+    // history is complete from day 1.
+    await this.dbRun(`
+      INSERT INTO bot_cash_movements (bot_id, type, amount_usdt, notes)
+      VALUES (?, 'initial', ?, 'Initial investment at bot creation')
+    `, [botId, params.investment_usdt]);
+
+    return botId;
+  }
+
+  /**
+   * Record a cash movement against a bot. Used by:
+   *   - compound rebalance ('compound')
+   *   - manual external deposits ('deposit')
+   *   - manual withdrawals ('withdrawal')
+   *
+   * The 'initial' type is only used by createBot().
+   *
+   * Recording movements lets the dashboard report:
+   *   bot.original_investment_usdt
+   *     + Σ deposits + Σ compounds − Σ withdrawals
+   *     = current notional
+   * with full provenance.
+   */
+  async recordCashMovement(params: {
+    bot_id: number;
+    type: 'compound' | 'deposit' | 'withdrawal';
+    amount_usdt: number;
+    notes?: string;
+  }): Promise<number> {
+    const result = await this.dbRun(`
+      INSERT INTO bot_cash_movements (bot_id, type, amount_usdt, notes)
+      VALUES (?, ?, ?, ?)
+    `, [params.bot_id, params.type, params.amount_usdt, params.notes ?? null]);
+    return result.lastID ?? 0;
+  }
+
+  /**
+   * Total amount the compound rebalance has already pulled out of the
+   * bot's grid profit. Used by checkCompoundRebalance() to avoid
+   * double-counting the same profit on successive runs.
+   */
+  async getCompoundedTotal(botId: number): Promise<number> {
+    const row = await this.dbGet(`
+      SELECT COALESCE(SUM(amount_usdt), 0) AS total
+      FROM bot_cash_movements
+      WHERE bot_id = ? AND type = 'compound'
+    `, botId);
+    return (row?.total as number | undefined) ?? 0;
+  }
+
+  async listCashMovements(botId: number): Promise<Array<{
+    id: number;
+    type: string;
+    amount_usdt: number;
+    notes: string | null;
+    occurred_at: string;
+  }>> {
+    return this.dbAll(`
+      SELECT id, type, amount_usdt, notes, occurred_at
+      FROM bot_cash_movements
+      WHERE bot_id = ?
+      ORDER BY occurred_at ASC
+    `, botId);
   }
 
   /**

@@ -31,32 +31,35 @@ export function StatsPanel({ bot }: StatsPanelProps) {
     refetchInterval: 30_000,
   });
 
-  // Real grid PnL via FIFO over fills_archive. Replaces the legacy
-  // bot.grid_profit_usdt + paired_roundtrips combo (frozen since March).
+  // Lifetime grid profit, computed by spread-pair matching of fills_archive
+  // post bot.created_at. Same algorithm as the engine's
+  // calculateRealGridProfit() but over the FULL backfilled history.
+  // Decoupled from compound/margin movements because it only counts
+  // matched trade pairs, not balance changes.
   const realized = useQuery({
     queryKey: ['realized-summary', bot.id],
     queryFn: () => api.getRealizedSummary(bot.id),
     refetchInterval: 30_000,
   });
 
-  const realizedPnl = realized.data?.realizedPnl ?? 0;  // gross, before fees
-  const netPnl = realized.data?.netPnl ?? 0;            // net of fees
-  const roundTrips = realized.data?.roundTrips ?? 0;
-  const avgPerRT = realized.data?.avgPerRT ?? 0;
+  const gridProfit = realized.data?.gridProfit ?? 0;       // gross
+  const netGridProfit = realized.data?.netGridProfit ?? 0; // net of fees
+  const pairs = realized.data?.pairs ?? 0;
+  const avgPerPair = realized.data?.avgPerPair ?? 0;
+  const unpairedSells = realized.data?.unpairedSells ?? 0;
 
-  // Days active: prefer the FIFO summary's first/last fill timestamps over
-  // the snapshot count, since fills_archive is the source of truth.
-  const firstFillNs = realized.data?.firstFillAt
+  // Days active from first/last fill in fills_archive.
+  const firstFillMs = realized.data?.firstFillAt
     ? Number(realized.data.firstFillAt) / 1_000_000
     : null;
-  const lastFillNs = realized.data?.lastFillAt
+  const lastFillMs = realized.data?.lastFillAt
     ? Number(realized.data.lastFillAt) / 1_000_000
     : null;
   const days =
-    firstFillNs && lastFillNs
-      ? Math.max(1, Math.ceil((lastFillNs - firstFillNs) / 86_400_000))
+    firstFillMs && lastFillMs
+      ? Math.max(1, Math.ceil((lastFillMs - firstFillMs) / 86_400_000))
       : (snapshots.data?.snapshots ?? []).length || 1;
-  const avgPerDay = netPnl / days;
+  const avgPerDay = netGridProfit / days;
 
   // Funding still comes from daily_snapshots — that's a different data
   // source (funding payments aren't in fills_archive). Funding row only
@@ -66,16 +69,26 @@ export function StatsPanel({ bot }: StatsPanelProps) {
 
   return (
     <Card className="p-5">
-      <h3 className="text-sm font-semibold text-text-primary mb-4">Statistics</h3>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-text-primary">Statistics</h3>
+        {unpairedSells > 0 && (
+          <span
+            className="text-2xs text-warning"
+            title={`${unpairedSells} sells couldn't be paired against a buy in our history. Likely caused by GRVT's fill_history window cutting off the oldest fills, or by manual position adjustments. Numbers below are a lower bound on real grid profit.`}
+          >
+            ⓘ partial data
+          </span>
+        )}
+      </div>
       <dl className="space-y-3">
         <Row
-          label="Realized (net)"
-          value={formatPnl(netPnl)}
-          tone={netPnl > 0 ? 'success' : netPnl < 0 ? 'danger' : 'default'}
+          label="Grid profit (net)"
+          value={formatPnl(netGridProfit)}
+          tone={netGridProfit > 0 ? 'success' : netGridProfit < 0 ? 'danger' : 'default'}
         />
-        <Row label="Realized (gross)" value={formatPnl(realizedPnl)} />
-        <Row label="Round trips" value={String(roundTrips)} />
-        <Row label="Avg profit/RT" value={formatPnl(avgPerRT)} />
+        <Row label="Grid profit (gross)" value={formatPnl(gridProfit)} />
+        <Row label="Round trips" value={String(pairs)} />
+        <Row label="Avg profit/pair" value={formatPnl(avgPerPair)} />
         <Row label="Days active" value={String(days)} />
         <Row
           label="Avg/day (net)"
