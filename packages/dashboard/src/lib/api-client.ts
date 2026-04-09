@@ -27,15 +27,30 @@ import {
 } from './api-types';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
-const API_KEY = import.meta.env.VITE_DASHBOARD_API_KEY ?? '';
+// Legacy API key — kept as fallback during migration so the
+// dashboard keeps working before the user logs in for the first time.
+const LEGACY_API_KEY = import.meta.env.VITE_DASHBOARD_API_KEY ?? '';
+
+// JWT token set by AuthProvider via setAuthToken(). Stored in a module
+// var so the request() helper reads the current value on every call
+// without needing React context.
+let jwtToken: string | null = null;
+export function setAuthToken(token: string) { jwtToken = token; }
+export function clearAuthToken() { jwtToken = null; }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const url = `${BASE_URL}/api/v2${path}`;
   const headers = new Headers(init.headers);
   headers.set('Accept', 'application/json');
-  if (API_KEY) {
-    headers.set('X-Api-Key', API_KEY);
+
+  // Prefer JWT. Fall back to legacy X-Api-Key if no token yet
+  // (first visit before login).
+  if (jwtToken) {
+    headers.set('Authorization', `Bearer ${jwtToken}`);
+  } else if (LEGACY_API_KEY) {
+    headers.set('X-Api-Key', LEGACY_API_KEY);
   }
+
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
@@ -54,6 +69,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) {
+    // On 401, dispatch a logout event so AuthProvider clears state
+    // and redirects to /login. Only fire if we had a token (avoid
+    // infinite loops on public pages).
+    if (response.status === 401 && jwtToken) {
+      window.dispatchEvent(new Event('auth:logout'));
+    }
     const message =
       (payload as { error?: string; message?: string } | null)?.message ??
       (payload as { error?: string } | null)?.error ??
@@ -61,6 +82,24 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(response.status, payload, message);
   }
 
+  return payload as T;
+}
+
+// ── Public auth requests (no token needed) ────────────────────────────
+async function publicRequest<T>(path: string, body: object): Promise<T> {
+  const url = `${BASE_URL}/api/v2${path}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const msg = (payload as { message?: string; error?: string } | null)?.message
+      ?? (payload as { error?: string } | null)?.error
+      ?? `HTTP ${response.status}`;
+    throw new ApiError(response.status, payload, msg);
+  }
   return payload as T;
 }
 
@@ -212,4 +251,52 @@ export const api = {
       `/candles?${qs.toString()}`
     );
   },
+
+  // ── Auth endpoints ──────────────────────────────────────────────
+
+  signup: (email: string, password: string) =>
+    publicRequest<{
+      token: string;
+      userId: number;
+      isAdmin: boolean;
+      hasGrvtCreds: boolean;
+    }>('/auth/signup', { email, password }),
+
+  login: (email: string, password: string) =>
+    publicRequest<{
+      token: string;
+      userId: number;
+      isAdmin: boolean;
+      hasGrvtCreds: boolean;
+    }>('/auth/login', { email, password }),
+
+  getMe: () =>
+    request<{
+      id: number;
+      email: string;
+      isAdmin: boolean;
+      hasGrvtCreds: boolean;
+      createdAt: number;
+      lastLoginAt: number | null;
+    }>('/auth/me'),
+
+  getTos: () =>
+    request<{ version: string; text: string }>('/auth/tos'),
+
+  saveGrvtCredentials: (body: {
+    apiKey: string;
+    apiSecret: string;
+    tradingAddress: string;
+    accountId: string;
+    subAccountId: string;
+  }) =>
+    request<{ ok: true }>('/auth/grvt-credentials', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteGrvtCredentials: () =>
+    request<{ ok: true }>('/auth/grvt-credentials', {
+      method: 'DELETE',
+    }),
 };

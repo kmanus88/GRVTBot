@@ -54,6 +54,37 @@ async function initializeServices() {
         } else {
           console.log(`👤 Owner bootstrap skipped (users already exist; owner=${result.userId})`);
         }
+
+        // If GRVT env creds are present AND the owner doesn't have
+        // DB-stored creds yet, encrypt and persist them so the owner
+        // gets hasGrvtCreds=true and doesn't hit the onboarding page.
+        const grvtApiKey = process.env.GRVT_API_KEY;
+        const grvtApiSecret = process.env.GRVT_API_SECRET;
+        const grvtTradingAddress = process.env.GRVT_TRADING_ADDRESS;
+        const grvtAccountId = process.env.GRVT_ACCOUNT_ID || '';
+        const grvtSubAccountId = process.env.GRVT_TRADING_ACCOUNT_ID || '';
+        const hasDbCreds = await db.hasGrvtCredentials(result.userId);
+        if (grvtApiKey && grvtApiSecret && grvtTradingAddress && grvtSubAccountId && !hasDbCreds) {
+          try {
+            const { encryptCredentialFields } = await import('../auth/crypto.js');
+            const encrypted = encryptCredentialFields({
+              apiKey: grvtApiKey,
+              apiSecret: grvtApiSecret,
+              tradingAddress: grvtTradingAddress,
+              accountId: grvtAccountId,
+              subAccountId: grvtSubAccountId,
+            });
+            await db.upsertGrvtCredentials({
+              user_id: result.userId,
+              ...encrypted,
+              last_test_ok: true,
+              last_test_error: null,
+            });
+            console.log(`🔐 Owner GRVT credentials encrypted and stored from env`);
+          } catch (cryptoErr) {
+            console.warn('⚠️  Failed to encrypt owner GRVT creds:', cryptoErr);
+          }
+        }
       } catch (err) {
         console.error('❌ Owner bootstrap failed:', err);
         // Non-fatal: server keeps starting. Admin can manually
