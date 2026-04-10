@@ -14,6 +14,7 @@ import type {
   GridLevel,
   GridState,
   OrderRow,
+  Roundtrip,
 } from '@/lib/api-types';
 import { useWsChannel } from '@/lib/use-ws-channel';
 import {
@@ -666,10 +667,10 @@ function CompoundSettings({ bot }: { bot: any }) {
 
 // ── Tabs (Fills + Snapshots for B.5; Orders/Funding deferred) ─────────
 
-type DetailTab = 'fills' | 'orders' | 'funding' | 'snapshots';
+type DetailTab = 'roundtrips' | 'fills' | 'orders' | 'funding' | 'snapshots';
 
 function BotDetailTabs({ botId }: { botId: number }) {
-  const [tab, setTab] = useState<DetailTab>('fills');
+  const [tab, setTab] = useState<DetailTab>('roundtrips');
 
   // Fills come from fills_archive (populated by the engine's
   // pollFillArchive loop). Replaces the old getTrades query which
@@ -694,6 +695,12 @@ function BotDetailTabs({ botId }: { botId: number }) {
     staleTime: 60_000,
   });
 
+  const roundtripsQuery = useQuery({
+    queryKey: ['roundtrips', botId],
+    queryFn: () => api.getRoundtrips(botId),
+    refetchInterval: 30_000,
+  });
+
   const snapshotsQuery = useQuery({
     queryKey: ['snapshots', botId],
     queryFn: () => api.getSnapshots(botId),
@@ -705,6 +712,11 @@ function BotDetailTabs({ botId }: { botId: number }) {
       <div className="px-5 pt-3">
         <Tabs
           items={[
+            {
+              value: 'roundtrips',
+              label: 'Roundtrips',
+              badge: roundtripsQuery.data?.count ?? '—',
+            },
             {
               value: 'fills',
               label: 'Fills',
@@ -729,6 +741,13 @@ function BotDetailTabs({ botId }: { botId: number }) {
           value={tab}
           onChange={(v) => setTab(v as DetailTab)}
         >
+          {tab === 'roundtrips' && (
+            <RoundtripsTable
+              roundtrips={roundtripsQuery.data?.roundtrips ?? []}
+              totalProfit={roundtripsQuery.data?.totalProfit ?? 0}
+              loading={roundtripsQuery.isPending}
+            />
+          )}
           {tab === 'fills' && (
             <FillsTable fills={fillsQuery.data?.fills ?? []} loading={fillsQuery.isPending} />
           )}
@@ -756,6 +775,107 @@ function BotDetailTabs({ botId }: { botId: number }) {
         </Tabs>
       </div>
     </Card>
+  );
+}
+
+// ── Roundtrips Table ──────────────────────────────────────────────────
+
+const ROUNDTRIP_COLUMNS: Column<Roundtrip>[] = [
+  {
+    key: 'time',
+    header: 'Time (UTC)',
+    render: (r) => formatTimeUtc(new Date(r.created_at).getTime()),
+    sortValue: (r) => new Date(r.created_at).getTime(),
+    mono: true,
+    width: '160px',
+  },
+  {
+    key: 'buy_price',
+    header: 'Buy',
+    render: (r) => formatUsd(r.buy_price),
+    sortValue: (r) => r.buy_price,
+    align: 'right',
+    mono: true,
+  },
+  {
+    key: 'sell_price',
+    header: 'Sell',
+    render: (r) => formatUsd(r.sell_price),
+    sortValue: (r) => r.sell_price,
+    align: 'right',
+    mono: true,
+  },
+  {
+    key: 'spread',
+    header: 'Spread',
+    render: (r) => {
+      const spread = r.sell_price - r.buy_price;
+      return (
+        <span className="text-text-secondary">{formatUsd(spread)}</span>
+      );
+    },
+    sortValue: (r) => r.sell_price - r.buy_price,
+    align: 'right',
+    mono: true,
+  },
+  {
+    key: 'size',
+    header: 'Size',
+    render: (r) => formatSize(r.size),
+    sortValue: (r) => r.size,
+    align: 'right',
+    mono: true,
+  },
+  {
+    key: 'profit',
+    header: 'Profit',
+    render: (r) => (
+      <span className={r.profit > 0 ? 'text-success font-semibold' : 'text-danger font-semibold'}>
+        {formatPnl(r.profit)}
+      </span>
+    ),
+    sortValue: (r) => r.profit,
+    align: 'right',
+    mono: true,
+  },
+];
+
+function RoundtripsTable({
+  roundtrips,
+  totalProfit,
+  loading,
+}: {
+  roundtrips: Roundtrip[];
+  totalProfit: number;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="text-center py-8 text-sm text-text-muted animate-pulse">
+        Loading roundtrips…
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="flex items-center justify-end pb-3 px-3 text-xs gap-4">
+        <span className="text-text-muted">
+          <Mono>{roundtrips.length}</Mono> paired roundtrips
+        </span>
+        <span className="text-text-muted uppercase tracking-wider">
+          Total profit:
+        </span>
+        <span className={totalProfit > 0 ? 'text-success font-semibold' : 'text-danger font-semibold'}>
+          <Mono>{formatPnl(totalProfit)}</Mono>
+        </span>
+      </div>
+      <DataTable
+        columns={ROUNDTRIP_COLUMNS}
+        rows={roundtrips}
+        rowKey={(r) => r.id}
+        pageSize={20}
+      />
+    </div>
   );
 }
 
