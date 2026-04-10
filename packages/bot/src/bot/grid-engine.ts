@@ -78,6 +78,33 @@ export interface RangeUpdatePlan {
 }
 
 /**
+ * Compute the per-level order quantity from investment parameters.
+ * Extracted as a standalone function so both createBot/validate and
+ * checkCompoundRebalance use the exact same formula.
+ */
+function computeQtyPerLevel(
+  investmentUsdt: number,
+  leverage: number,
+  numGrids: number,
+  midPrice: number,
+  pair: string = 'ETH_USDT_Perp'
+): number {
+  const ORDER_ALLOC = 0.75;
+  const effCap = investmentUsdt * leverage * ORDER_ALLOC;
+  const minSize = pair === 'BTC_USDT_Perp' ? 0.001 : 0.01;
+  let qty = Math.max(
+    Math.ceil((effCap / numGrids / midPrice) * 100) / 100,
+    0.03
+  );
+  // Ensure min notional at lowest likely price
+  const minNotional = pair === 'BTC_USDT_Perp' ? 100 : 20;
+  while (qty * midPrice * 0.8 < minNotional) {
+    qty += minSize;
+  }
+  return Math.round(qty * 100) / 100;
+}
+
+/**
  * Grid Trading Engine
  * Maneja la lógica completa de grid trading con safeguards
  */
@@ -128,32 +155,13 @@ export class GridEngine extends EventEmitter {
         this.pollFundingHistory().catch(console.error);
       }, 30 * 60 * 1000); // 30 minutos
 
-      // ❌ COMPOUND REBALANCE DISABLED ❌
-      //
-      // The previous implementation had two compounding bugs that
-      // ate user funds invisibly:
-      //
-      //   1. It computed "profit" as `balance - investment_usdt`,
-      //      which conflated real grid profit with any external
-      //      margin transferred into the sub-account. Every dollar
-      //      the user moved in via funding→trading was treated as
-      //      bot profit and reinvested. Bot 42's investment_usdt
-      //      ballooned from $640 → $1085 partly from this.
-      //
-      //   2. When it bumped investment_usdt, the per-level qty also
-      //      grew (via the recompute in getFixedQty()), but the
-      //      position was never bumped to match. Bot 42 ran for
-      //      months in a sub-collateralized state until we caught
-      //      it during a range-update test.
-      //
-      // Disabled until we redesign it properly: real grid_profit_usdt
-      // as the input (not balance diff), and atomic position bump in
-      // the same operation as the investment bump.
-      //
-      // this.compoundCheckInterval = setInterval(() => {
-      //   this.checkCompoundRebalance().catch(err => console.error('Compound check error:', err));
-      // }, 60 * 60 * 1000);
-      console.log('⚠️  Compound rebalance is DISABLED (broken; pending redesign)');
+      // Compound rebalance: checks every hour. Only acts on bots with
+      // compound_pct > 0. Uses real grid profit (spread-paired fills),
+      // bumps investment_usdt + quantity_per_level atomically.
+      this.compoundCheckInterval = setInterval(() => {
+        this.checkCompoundRebalance().catch(err => console.error('Compound check error:', err));
+      }, 60 * 60 * 1000);
+      console.log('🔄 Compound rebalance enabled (per-bot opt-in, checks every 1h)');
 
       // ⚠️ NUEVO: Daily snapshots cada 24h (00:00 UTC)
       // Inline setup (method is on GridBotInstance, not GridEngine)
@@ -964,13 +972,12 @@ export class GridEngine extends EventEmitter {
       for (const bot of bots) {
         if (bot.status !== 'running') continue;
 
-        // Read compound settings from DB columns (NOT params_json)
-        const pct = (bot as any).compound_pct || 0;
-        const threshold = (bot as any).compound_threshold_usdt || 100;
-        const intervalHours = (bot as any).compound_interval_hours || 168;
-        const lastCompoundAt = (bot as any).last_compound_at;
+        const pct = bot.compound_pct || 0;
+        const threshold = bot.compound_threshold_usdt || 50;
+        const intervalHours = bot.compound_interval_hours || 24;
+        const lastCompoundAt = bot.last_compound_at;
 
-        if (pct <= 0) continue; // Compound disabled
+        if (pct <= 0) continue; // Compound disabled for this bot
 
         // Check if enough time has passed since last compound
         if (lastCompoundAt) {
@@ -978,54 +985,46 @@ export class GridEngine extends EventEmitter {
           if (hoursSince < intervalHours) continue;
         }
 
-        // ── GET REAL GRID PROFIT (NOT BALANCE DIFF) ─────────────────
-        // The previous implementation did `balance - investment_usdt`
-        // which catastrophically conflates real grid profit with any
-        // external margin transferred into the sub-account: every
-        // dollar the user moved in via funding→trading was treated as
-        // bot profit and reinvested. We now use the bot's own
-        // `grid_profit_usdt` (live, computed from spread-paired fills
-        // — see calculateRealGridProfit) which is independent of
-        // balance changes and only counts actual round-trip earnings.
-        //
-        // We then SUBTRACT the cumulative compound amount already
-        // taken so the same profit isn't compounded twice.
+        // Use real grid profit from spread-paired fills, NOT balance diff.
+        // Subtract cumulative compound amount already taken.
         const gridProfitTotal = bot.grid_profit_usdt ?? 0;
-
-        const compoundedSoFarRow = await db.getCompoundedTotal(bot.id);
-        const alreadyCompounded = compoundedSoFarRow ?? 0;
-
+        const alreadyCompounded = await db.getCompoundedTotal(bot.id) ?? 0;
         const availableProfit = gridProfitTotal - alreadyCompounded;
 
         if (availableProfit < threshold) {
-          console.log(`📊 Compound check bot ${bot.id}: available profit $${availableProfit.toFixed(2)} < threshold $${threshold} — skipping`);
+          console.log(`📊 Compound bot ${bot.id}: $${availableProfit.toFixed(2)} available < $${threshold} threshold — skip`);
           continue;
         }
 
-        // Calculate compound amount from REAL grid profit only.
+        // Calculate compound amount and new qty_per_level.
         const compoundAmount = availableProfit * (pct / 100);
         const newInvestment = bot.investment_usdt + compoundAmount;
+        const midPrice = (bot.lower_price + bot.upper_price) / 2;
+        const newQty = computeQtyPerLevel(newInvestment, bot.leverage, bot.num_grids, midPrice, bot.pair);
+        const oldQty = bot.quantity_per_level || 0;
 
-        console.log(`🔄 Compounding bot ${bot.id}: +$${compoundAmount.toFixed(2)} (${pct}% of $${availableProfit.toFixed(2)} available grid profit; lifetime: $${gridProfitTotal.toFixed(2)}, prev compounded: $${alreadyCompounded.toFixed(2)})`);
+        console.log(`🔄 Compound bot ${bot.id}: +$${compoundAmount.toFixed(2)} (${pct}% of $${availableProfit.toFixed(2)} profit)`);
+        console.log(`   investment: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}, qty: ${oldQty} → ${newQty}`);
 
-        // SAFE: Only update investment_usdt and last_compound_at in DB
-        // NO pauseBot, NO startBot, NO recalculating grid levels
-        // Monitor reads investment_usdt each cycle and uses dynamic qty for new orders
+        // Atomic DB update: bump investment AND qty_per_level together.
+        // New orders placed by monitor() will use the new qty. Existing
+        // orders stay at old qty until they fill and get replaced — the
+        // position adjusts organically over grid cycles.
         await db.updateBot(bot.id, {
           investment_usdt: newInvestment,
-          last_compound_at: new Date().toISOString()
-        } as any);
+          quantity_per_level: newQty,
+          total_reinvested: (bot.total_reinvested || 0) + compoundAmount,
+          last_compound_at: new Date().toISOString(),
+        });
 
-        // Log the movement so /realized-summary and the dashboard can
-        // always reconstruct the cash flow trail.
         await db.recordCashMovement({
           bot_id: bot.id,
           type: 'compound',
           amount_usdt: compoundAmount,
-          notes: `${pct}% of $${availableProfit.toFixed(2)} grid profit (lifetime $${gridProfitTotal.toFixed(2)})`,
+          notes: `${pct}% of $${availableProfit.toFixed(2)} grid profit (lifetime $${gridProfitTotal.toFixed(2)}, qty ${oldQty}→${newQty})`,
         });
 
-        console.log(`✅ Bot ${bot.id} compuesto: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}`);
+        console.log(`✅ Bot ${bot.id} compounded: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}`);
       }
 
     } catch (error) {

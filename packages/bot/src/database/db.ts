@@ -36,11 +36,17 @@ export interface GridBot {
   grid_profit_seed?: number;
   grid_profit_seed_timestamp?: string;
   total_reinvested?: number;
+  original_investment_usdt?: number;
   // Set at creation, immutable. Source of truth for per-level order
   // size — read by getFixedQty(), updateBotRange(), etc. Replaces
   // the recompute-from-investment_usdt formula that drifted under
   // compound rebalances.
   quantity_per_level?: number;
+  // Compound rebalance settings (0 = disabled)
+  compound_pct?: number;
+  compound_threshold_usdt?: number;
+  compound_interval_hours?: number;
+  last_compound_at?: string;
 }
 
 export interface GridLevel {

@@ -237,6 +237,19 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  updateCompound: (
+    id: number,
+    body: {
+      compound_pct: number;
+      compound_threshold_usdt?: number;
+      compound_interval_hours?: number;
+    }
+  ) =>
+    request<{ id: number; compound_pct: number }>(`/bots/${id}/compound`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
   getCandles: (
     pair: string,
     interval: CandleInterval = 'CI_1_H',

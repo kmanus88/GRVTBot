@@ -437,7 +437,10 @@ export function createV2Router(deps: V2RouterDeps): Router {
       SELECT id, pair, direction, leverage, lower_price, upper_price, num_grids,
              investment_usdt, grid_profit_usdt, trend_pnl_usdt, total_pnl_usdt,
              status, position_size, avg_entry_price, liquidation_price,
-             created_at, updated_at
+             created_at, updated_at,
+             compound_pct, compound_threshold_usdt, compound_interval_hours,
+             last_compound_at, total_reinvested, original_investment_usdt,
+             quantity_per_level
       FROM grid_bots
       WHERE COALESCE(user_id, 1) = ?
       ORDER BY created_at DESC
@@ -1330,7 +1333,12 @@ export function createV2Router(deps: V2RouterDeps): Router {
         });
       }
 
-      // Invalidate the bots cache so the next /bots GET sees the new row.
+      // Save compound settings if provided
+      const compoundPct = Number((req.body as any)?.compound_pct);
+      if (Number.isFinite(compoundPct) && compoundPct > 0 && compoundPct <= 100) {
+        await dbRun(db, `UPDATE grid_bots SET compound_pct = ? WHERE id = ?`, [compoundPct, botId]);
+      }
+
       cache.invalidatePrefix('bots');
       res.status(201).json({ id: botId, status: 'paused' });
     } catch (err) {
@@ -1416,6 +1424,46 @@ export function createV2Router(deps: V2RouterDeps): Router {
         message: (err as Error).message,
       });
     }
+    return;
+  }));
+
+  // ── PATCH /api/v2/bots/:id/compound ─────────────────────────────────
+  // Update compound rebalance settings for a bot. compound_pct=0 disables.
+  router.patch('/bots/:id/compound', asyncHandler(async (req, res) => {
+    const id = parseInt(String(req.params.id ?? ''), 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid bot id' });
+    await requireBotOwnership(db, id, req.userId!);
+
+    const { compound_pct, compound_threshold_usdt, compound_interval_hours } = req.body ?? {};
+
+    // Validate compound_pct (required, 0-100)
+    if (compound_pct == null || typeof compound_pct !== 'number' || compound_pct < 0 || compound_pct > 100) {
+      return res.status(400).json({ error: 'compound_pct must be a number between 0 and 100' });
+    }
+
+    const updates: Record<string, number> = { compound_pct };
+    if (compound_threshold_usdt != null) {
+      if (typeof compound_threshold_usdt !== 'number' || compound_threshold_usdt <= 0) {
+        return res.status(400).json({ error: 'compound_threshold_usdt must be > 0' });
+      }
+      updates.compound_threshold_usdt = compound_threshold_usdt;
+    }
+    if (compound_interval_hours != null) {
+      if (typeof compound_interval_hours !== 'number' || compound_interval_hours < 1) {
+        return res.status(400).json({ error: 'compound_interval_hours must be >= 1' });
+      }
+      updates.compound_interval_hours = compound_interval_hours;
+    }
+
+    await dbRun(db, `
+      UPDATE grid_bots
+      SET ${Object.keys(updates).map(k => `${k} = ?`).join(', ')}, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [...Object.values(updates), id]);
+
+    cache.invalidatePrefix('bots');
+    log.info({ botId: id, ...updates }, 'compound settings updated');
+    res.json({ id, ...updates });
     return;
   }));
 

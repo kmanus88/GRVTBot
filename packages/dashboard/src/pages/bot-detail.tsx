@@ -490,6 +490,11 @@ export function BotDetailPage() {
         <StatsPanel bot={bot} />
       </div>
 
+      {/* Compound settings */}
+      {status !== 'stopped' && (
+        <CompoundSettings bot={bot} />
+      )}
+
       {/* Tabs */}
       <BotDetailTabs botId={botId} />
 
@@ -503,6 +508,159 @@ export function BotDetailPage() {
         markPrice={markPrice}
       />
     </div>
+  );
+}
+
+// ── Compound Reinvestment Settings ──────────────────────────────────────
+
+function CompoundSettings({ bot }: { bot: any }) {
+  const qc = useQueryClient();
+  const [pct, setPct] = useState<number>(bot.compound_pct ?? 0);
+  const [threshold, setThreshold] = useState<number>(bot.compound_threshold_usdt ?? 50);
+  const [interval, setInterval_] = useState<number>(bot.compound_interval_hours ?? 24);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const dirty =
+    pct !== (bot.compound_pct ?? 0) ||
+    threshold !== (bot.compound_threshold_usdt ?? 50) ||
+    interval !== (bot.compound_interval_hours ?? 24);
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      api.updateCompound(bot.id, {
+        compound_pct: pct,
+        compound_threshold_usdt: threshold,
+        compound_interval_hours: interval,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['bot', bot.id] });
+      qc.invalidateQueries({ queryKey: ['bots'] });
+      toast.success(
+        pct > 0
+          ? `Compound set to ${pct}% every ${interval}h`
+          : 'Compound disabled'
+      );
+    },
+    onError: (err) => toast.error((err as Error).message),
+  });
+
+  const presets = [0, 10, 25, 50, 75, 100];
+  const reinvested = bot.total_reinvested ?? 0;
+  const lastAt = bot.last_compound_at;
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-sm font-semibold text-text-primary">
+            Reinvestment
+          </h3>
+          <p className="text-2xs text-text-muted mt-0.5">
+            Auto-reinvest grid profit into larger orders
+          </p>
+        </div>
+        {reinvested > 0 && (
+          <div className="text-right">
+            <div className="text-2xs text-text-muted">Total reinvested</div>
+            <Mono className="text-sm text-success">
+              {formatUsd(reinvested)}
+            </Mono>
+          </div>
+        )}
+      </div>
+
+      {/* Preset buttons */}
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-2xs text-text-muted w-20 shrink-0">
+          Reinvest %
+        </span>
+        <div className="flex gap-1.5 flex-wrap">
+          {presets.map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setPct(p)}
+              className={`px-3 py-1 rounded text-xs font-mono tabular-nums transition-colors ${
+                pct === p
+                  ? 'bg-primary text-white'
+                  : 'bg-bg-elevated text-text-secondary hover:bg-bg-muted'
+              }`}
+            >
+              {p}%
+            </button>
+          ))}
+        </div>
+        <input
+          type="number"
+          min={0}
+          max={100}
+          step={1}
+          value={pct}
+          onChange={(e) => setPct(Math.min(100, Math.max(0, Number(e.target.value) || 0)))}
+          className="w-16 px-2 py-1 rounded bg-bg-elevated border border-border-subtle text-xs font-mono tabular-nums text-text-primary text-right"
+          aria-label="Custom compound percentage"
+        />
+      </div>
+
+      {/* Advanced settings toggle */}
+      <button
+        type="button"
+        onClick={() => setShowAdvanced(!showAdvanced)}
+        className="text-2xs text-text-muted hover:text-text-secondary mb-2"
+      >
+        {showAdvanced ? '- Hide' : '+ Show'} advanced
+      </button>
+
+      {showAdvanced && (
+        <div className="flex gap-4 mb-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-2xs text-text-muted">
+              Min profit (USD)
+            </span>
+            <input
+              type="number"
+              min={1}
+              step={10}
+              value={threshold}
+              onChange={(e) => setThreshold(Math.max(1, Number(e.target.value) || 50))}
+              className="w-24 px-2 py-1 rounded bg-bg-elevated border border-border-subtle text-xs font-mono tabular-nums text-text-primary"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-2xs text-text-muted">
+              Check every (hours)
+            </span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={interval}
+              onChange={(e) => setInterval_(Math.max(1, Number(e.target.value) || 24))}
+              className="w-24 px-2 py-1 rounded bg-bg-elevated border border-border-subtle text-xs font-mono tabular-nums text-text-primary"
+            />
+          </label>
+        </div>
+      )}
+
+      {/* Save + status */}
+      <div className="flex items-center gap-3">
+        <Button
+          variant={dirty ? 'primary' : 'secondary'}
+          onClick={() => mutation.mutate()}
+          disabled={!dirty || mutation.isPending}
+        >
+          {mutation.isPending ? 'Saving…' : 'Save'}
+        </Button>
+        {lastAt && (
+          <span className="text-2xs text-text-muted">
+            Last compound: {formatTimeUtc(lastAt)}
+          </span>
+        )}
+        {pct === 0 && !dirty && (
+          <span className="text-2xs text-text-muted">Disabled</span>
+        )}
+      </div>
+    </Card>
   );
 }
 

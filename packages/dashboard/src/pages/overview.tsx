@@ -52,9 +52,8 @@ export function OverviewPage() {
     );
   }
 
-  // Hide stopped bots from the active overview. They stay in the DB
-  // for history (queryable via /history later) but don't pollute the
-  // count, the aggregate stats, or the bot card grid.
+  // Hide stopped bots from the overview aggregate stats. Stopped bots
+  // are visible under the "History" section on the Bots page.
   const allBots = botsQuery.data?.bots ?? [];
   const bots = allBots.filter((b) => b.status !== 'stopped');
 

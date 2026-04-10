@@ -44,6 +44,7 @@ interface WizardState {
   investment: string;
   leverage: string;
   acceptedRisk: boolean;
+  compoundPct: string;
 }
 
 const INITIAL_STATE: WizardState = {
@@ -55,6 +56,7 @@ const INITIAL_STATE: WizardState = {
   investment: '1085',
   leverage: '10',
   acceptedRisk: false,
+  compoundPct: '0',
 };
 
 const PAIRS = [
@@ -107,6 +109,7 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
 
   function handleCreate() {
     if (!validated) return;
+    const compoundPct = Math.min(100, Math.max(0, parseInt(state.compoundPct || '0', 10)));
     createMutation.mutate({
       pair: validated.pair,
       direction: validated.direction,
@@ -115,7 +118,8 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
       num_grids: validated.input.grids,
       investment_usdt: validated.input.investment,
       leverage: validated.input.leverage,
-    });
+      ...(compoundPct > 0 ? { compound_pct: compoundPct } : {}),
+    } as any);
   }
 
   function update<K extends keyof WizardState>(key: K, value: WizardState[K]) {
@@ -124,7 +128,7 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
     // changes — ticking the risk checkbox on step 4 must NOT reset
     // validated, otherwise StepConfirm re-renders to null (line 469)
     // and the checkbox disappears mid-tick, breaking the wizard.
-    if (key !== 'acceptedRisk') {
+    if (key !== 'acceptedRisk' && key !== 'compoundPct') {
       setValidated(null);
     }
   }
@@ -419,6 +423,16 @@ function StepConfig({
           value={state.grids}
           onChange={(e) => update('grids', e.target.value)}
           helper="2 – 95"
+        />
+      </div>
+      <div className="mt-4">
+        <Input
+          label="Reinvest profit %"
+          numeric
+          inputMode="numeric"
+          value={state.compoundPct}
+          onChange={(e) => update('compoundPct', e.target.value)}
+          helper="0 = disabled, 100 = reinvest all profit"
         />
       </div>
       <p className="mt-4 text-xs text-text-muted">

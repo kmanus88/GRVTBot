@@ -22,6 +22,14 @@ export interface BotSummary {
   liquidation_price: number | null;
   created_at: string;
   updated_at: string;
+  // Compound rebalance (optional — 0 or absent = disabled)
+  compound_pct?: number;
+  compound_threshold_usdt?: number;
+  compound_interval_hours?: number;
+  last_compound_at?: string | null;
+  total_reinvested?: number;
+  original_investment_usdt?: number;
+  quantity_per_level?: number;
 }
 
 export interface GridLevel {

@@ -54,9 +54,9 @@ export function BotsListPage() {
     );
   }
 
-  // Hide stopped bots from the active list — they live in History.
   const allBots = botsQuery.data?.bots ?? [];
   const bots = allBots.filter((b) => b.status !== 'stopped');
+  const stoppedBots = allBots.filter((b) => b.status === 'stopped');
   const runningCount = bots.filter((b) => b.status === 'running').length;
 
   return (
@@ -93,6 +93,25 @@ export function BotsListPage() {
           </div>
         </button>
       </div>
+
+      {stoppedBots.length > 0 && (
+        <div className="flex flex-col gap-4">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight text-text-secondary">
+              History
+            </h2>
+            <p className="text-sm text-text-muted mt-0.5">
+              {stoppedBots.length} closed{' '}
+              {stoppedBots.length === 1 ? 'bot' : 'bots'}
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 opacity-75">
+            {stoppedBots.map((bot) => (
+              <BotCard key={bot.id} bot={bot} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {wizardOpen && (
         <Suspense fallback={null}>
