@@ -65,6 +65,7 @@ services:
       GRID_BOT_DB: /shared-data/grid_bot.db
       NOTIFIER_STATE_DIR: /var/lib/grvt-grid-notifier
       LOG_LEVEL: "${LOG_LEVEL:-info}"
+      NOTIFIER_HEALTH_PORT: "3849"
     volumes:
       # READ-ONLY mount of the bot's data dir — defense in depth.
       - ./data:/shared-data:ro
@@ -73,6 +74,12 @@ services:
     depends_on:
       bot:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3849/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     profiles: ["full", "with-notifier"]
 
   caddy:

@@ -5,7 +5,10 @@ import { grvtClient, type GRVTClient } from '../api/client.js';
 import { getGrvtClientForUser, invalidateGrvtClient } from '../api/grvt-client-factory.js';
 import { db } from '../database/db.js';
 import type { GridBot, GridLevel, OrderRecord } from '../database/db.js';
+import { childLogger } from '../server/logger.js';
 import { EventEmitter } from 'events';
+
+const log = childLogger('engine');
 
 export interface GridConfig {
   // Multi-tenant: which user owns this bot. Required for new bots
@@ -165,7 +168,7 @@ export class GridEngine extends EventEmitter {
   private track<T>(label: string, fn: () => Promise<T>): void {
     if (!this.isRunning) return;
     const task = fn().catch((err) => {
-      console.error(`❌ [${label}] in-flight task failed:`, (err as Error).message);
+      log.error({ err: (err as Error).message }, `[${label}] in-flight task failed`);
     });
     this.inflightTasks.add(task);
     task.finally(() => this.inflightTasks.delete(task));
@@ -180,9 +183,9 @@ export class GridEngine extends EventEmitter {
   private async drainInflight(label: string): Promise<void> {
     if (this.inflightTasks.size === 0) return;
     const pending = this.inflightTasks.size;
-    console.log(`⏳ ${label}: waiting for ${pending} in-flight task(s) to settle...`);
+    log.info(`⏳ ${label}: waiting for ${pending} in-flight task(s) to settle...`);
     await Promise.allSettled([...this.inflightTasks]);
-    console.log(`✅ ${label}: in-flight drain complete`);
+    log.info(`✅ ${label}: in-flight drain complete`);
   }
 
   isBotMutating(botId: number): boolean {
@@ -191,7 +194,7 @@ export class GridEngine extends EventEmitter {
 
   constructor() {
     super();
-    console.log('🤖 Grid Engine inicializado');
+    log.info('🤖 Grid Engine inicializado');
   }
 
   /**
@@ -211,7 +214,7 @@ export class GridEngine extends EventEmitter {
       try {
         return await getGrvtClientForUser(bot.user_id, db as any);
       } catch (err) {
-        console.warn(
+        log.warn(
           `⚠️  Per-user GRVT client lookup failed for user ${bot.user_id} (bot ${bot.id ?? '?'}): ${(err as Error).message}. Falling back to singleton.`
         );
       }
@@ -236,14 +239,14 @@ export class GridEngine extends EventEmitter {
           instance.rebindClient(fresh);
           affected.push(botId);
         } catch (err) {
-          console.warn(
+          log.warn(
             `⚠️  rebindGrvtClient: failed to refresh client for bot ${botId}: ${(err as Error).message}`
           );
         }
       }
     }
     if (affected.length > 0) {
-      console.log(`🔄 Rebound GRVT client for user ${userId} on bots: ${affected.join(', ')}`);
+      log.info(`🔄 Rebound GRVT client for user ${userId} on bots: ${affected.join(', ')}`);
     }
   }
 
@@ -252,7 +255,7 @@ export class GridEngine extends EventEmitter {
    */
   async start(): Promise<void> {
     if (this.isRunning) {
-      console.log('⚠️ Grid Engine ya está ejecutándose');
+      log.info('⚠️ Grid Engine ya está ejecutándose');
       return;
     }
 
@@ -283,7 +286,7 @@ export class GridEngine extends EventEmitter {
       this.compoundCheckInterval = setInterval(() => {
         this.track('checkCompoundRebalance', () => this.checkCompoundRebalance());
       }, 60 * 60 * 1000);
-      console.log('🔄 Compound rebalance enabled (per-bot opt-in, checks every 1h)');
+      log.info('🔄 Compound rebalance enabled (per-bot opt-in, checks every 1h)');
 
       // ⚠️ NUEVO: Daily snapshots cada 24h (00:00 UTC)
       // Inline setup (method is on GridBotInstance, not GridEngine)
@@ -292,7 +295,7 @@ export class GridEngine extends EventEmitter {
       tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
       tomorrow.setUTCHours(0, 0, 0, 0);
       const msUntilMidnight = tomorrow.getTime() - now.getTime();
-      console.log(`📸 Daily snapshots configurados - próximo en ${Math.round(msUntilMidnight / 1000 / 3600)} horas`);
+      log.info(`📸 Daily snapshots configurados - próximo en ${Math.round(msUntilMidnight / 1000 / 3600)} horas`);
       // Note: actual snapshot logic is in GridBotInstance.createDailySnapshots()
 
       // ⚠️ NUEVO: Backfill inicial de funding history
@@ -313,10 +316,10 @@ export class GridEngine extends EventEmitter {
       setTimeout(() => {
         this.track('pollFillArchive:initial', () => this.pollFillArchive());
       }, 8_000);
-      console.log('✅ Grid Engine iniciado - monitoreando cada 5s, funding cada 30min, fills cada 30s, snapshots cada 24h');
+      log.info('✅ Grid Engine iniciado - monitoreando cada 5s, funding cada 30min, fills cada 30s, snapshots cada 24h');
       
     } catch (error) {
-      console.error('❌ Error iniciando Grid Engine:', error);
+      log.error({ err: (error as Error).message }, '❌ Error iniciando Grid Engine:');
       throw error;
     }
   }
@@ -385,7 +388,7 @@ export class GridEngine extends EventEmitter {
       }
     }
 
-    console.log(
+    log.info(
       `🛑 Grid Engine detenido${options.preserveOrders ? ' (orders preserved on GRVT)' : ''}`
     );
   }
@@ -447,13 +450,13 @@ export class GridEngine extends EventEmitter {
         });
       }
 
-      console.log(`✅ Bot creado: ID ${botId} - ${config.pair} ${config.direction} ${config.leverage}x (PAUSADO)`);
+      log.info(`✅ Bot creado: ID ${botId} - ${config.pair} ${config.direction} ${config.leverage}x (PAUSADO)`);
       this.emit('botCreated', { botId, config });
 
       return botId;
 
     } catch (error) {
-      console.error('❌ Error creando bot:', error);
+      log.error({ err: (error as Error).message }, '❌ Error creando bot:');
       throw error;
     }
   }
@@ -483,7 +486,7 @@ export class GridEngine extends EventEmitter {
       if (!bot) throw new Error(`Bot ${botId} no encontrado`);
 
       if (bot.status === 'running') {
-        console.log(`⚠️ Bot ${botId} ya está ejecutándose`);
+        log.info(`⚠️ Bot ${botId} ya está ejecutándose`);
         return;
       }
 
@@ -512,7 +515,7 @@ export class GridEngine extends EventEmitter {
         try {
           return await fn();
         } catch (err1) {
-          console.warn(`⚠️ ${label} failed once during startBot detection, retrying in 1s: ${(err1 as Error).message}`);
+          log.warn(`⚠️ ${label} failed once during startBot detection, retrying in 1s: ${(err1 as Error).message}`);
           await new Promise((r) => setTimeout(r, 1000));
           try {
             return await fn();
@@ -544,12 +547,12 @@ export class GridEngine extends EventEmitter {
       this.bots.set(botId, instance);
 
       if (hasExistingState) {
-        console.log(
+        log.info(
           `🔁 Bot ${botId} RESUME — found ${existingOrders.length} open orders + position size ${positionSize}. Skipping bootstrap.`
         );
         await this.resumeBotInstance(bot, instance, existingOrders);
       } else {
-        console.log(`🆕 Bot ${botId} FRESH START — no existing GRVT state, bootstrapping.`);
+        log.info(`🆕 Bot ${botId} FRESH START — no existing GRVT state, bootstrapping.`);
         // Verificar balance antes de iniciar
         await this.validateSufficientBalance(bot);
         // Establecer leverage
@@ -561,14 +564,14 @@ export class GridEngine extends EventEmitter {
       // Actualizar status a running (idem en ambos casos)
       await db.updateBot(botId, { status: 'running' });
 
-      console.log(`🚀 Bot ${botId} iniciado - ${bot.pair} ${bot.direction} ${bot.leverage}x`);
+      log.info(`🚀 Bot ${botId} iniciado - ${bot.pair} ${bot.direction} ${bot.leverage}x`);
       this.emit('botStarted', { botId });
 
     } catch (error) {
       // Roll back the in-memory instance registration so a failed start
       // doesn't leave a dangling instance the monitor loop will trip on.
       this.bots.delete(botId);
-      console.error(`❌ Error iniciando bot ${botId}:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error iniciando bot ${botId}:`);
       throw error;
     }
   }
@@ -608,7 +611,7 @@ export class GridEngine extends EventEmitter {
       }
     }
 
-    console.log(
+    log.info(
       `✅ Bot ${bot.id} resumed: ${instance.getActiveOrderCount()} órdenes mapeadas a grid levels`
     );
   }
@@ -626,11 +629,11 @@ export class GridEngine extends EventEmitter {
 
       await db.updateBot(botId, { status: 'paused' });
       
-      console.log(`⏸️ Bot ${botId} pausado`);
+      log.info(`⏸️ Bot ${botId} pausado`);
       this.emit('botPaused', { botId });
 
     } catch (error) {
-      console.error(`❌ Error pausando bot ${botId}:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error pausando bot ${botId}:`);
       throw error;
     }
   }
@@ -653,19 +656,19 @@ export class GridEngine extends EventEmitter {
       await this.pauseBot(botId);
 
       // ⚠️ CRÍTICO: Consultar posición real de GRVT, NO usar DB
-      console.log('📊 Consultando posición real en GRVT...');
+      log.info('📊 Consultando posición real en GRVT...');
       const positions = await client.getPositions();
       const position = positions.find(p => p.instrument === bot.pair);
       const realPositionSize = position ? parseFloat(position.size) : 0;
 
-      console.log(`📍 Posición real: ${realPositionSize} (DB: ${bot.position_size})`);
+      log.info(`📍 Posición real: ${realPositionSize} (DB: ${bot.position_size})`);
 
       // Si hay posición abierta, cerrarla con orden agresiva
       if (realPositionSize !== 0) {
         const closeSide = realPositionSize > 0 ? 'sell' : 'buy';
         const closeSize = Math.abs(realPositionSize);
 
-        console.log(`🔄 Cerrando posición: ${closeSide} ${closeSize} ${bot.pair}`);
+        log.info(`🔄 Cerrando posición: ${closeSide} ${closeSize} ${bot.pair}`);
 
         // Precio agresivo (0.5% peor que market) con GTC para garantizar fill
         const ticker = await client.getTicker(bot.pair);
@@ -687,17 +690,17 @@ export class GridEngine extends EventEmitter {
           time_in_force: 'gtc'  // GTC matchea timeInForce=1 en EIP-712
         }, true);
 
-        console.log(`✅ Orden de cierre: ${closeSide} ${closeSize} @ $${aggressivePrice} (GTC)`);
+        log.info(`✅ Orden de cierre: ${closeSide} ${closeSize} @ $${aggressivePrice} (GTC)`);
       }
 
       // Actualizar status a stopped
       await db.updateBot(botId, { status: 'stopped', position_size: realPositionSize });
 
-      console.log(`🛑 Bot ${botId} cerrado completamente`);
+      log.info(`🛑 Bot ${botId} cerrado completamente`);
       this.emit('botClosed', { botId });
 
     } catch (error) {
-      console.error(`❌ Error cerrando bot ${botId}:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error cerrando bot ${botId}:`);
       throw error;
     }
   }
@@ -710,7 +713,7 @@ export class GridEngine extends EventEmitter {
 
     for (const bot of activeBots) {
       try {
-        console.log(`🔧 [DEBUG] Cargando bot ${bot.id} - ${bot.pair} (status: ${bot.status})`);
+        log.info(`🔧 [DEBUG] Cargando bot ${bot.id} - ${bot.pair} (status: ${bot.status})`);
 
         // Inject the bot owner's GRVT client so this instance uses
         // the correct per-user auth on every tick (multi-tenant).
@@ -719,19 +722,19 @@ export class GridEngine extends EventEmitter {
         this.bots.set(bot.id, instance);
 
         const openOrders = await client.getOpenOrders(bot.pair);
-        console.log(`📥 Bot ${bot.id}: ${openOrders.length} órdenes abiertas en GRVT`);
+        log.info(`📥 Bot ${bot.id}: ${openOrders.length} órdenes abiertas en GRVT`);
 
         // Shared resume logic with startBot()'s RESUME path.
         await this.resumeBotInstance(bot, instance, openOrders);
 
       } catch (error) {
-        console.error(`❌ Error cargando bot ${bot.id}:`, error);
+        log.error({ err: (error as Error).message }, `❌ Error cargando bot ${bot.id}:`);
         this.bots.delete(bot.id);
         await db.updateBot(bot.id, { status: 'paused' });
       }
     }
 
-    console.log(`✅ ${activeBots.length} bots activos cargados y verificados`);
+    log.info(`✅ ${activeBots.length} bots activos cargados y verificados`);
   }
 
   /**
@@ -753,13 +756,13 @@ export class GridEngine extends EventEmitter {
       try {
         await instance.monitor();
       } catch (error) {
-        console.error(`❌ Error monitoreando bot ${botId}:`, error);
+        log.error({ err: (error as Error).message }, `❌ Error monitoreando bot ${botId}:`);
 
         // Si hay errores críticos, pausar el bot (o pausar + cerrar según la acción).
         // Message format: SAFEGUARD:<action>:bot=N:dist=X%:liq=Y:mark=Z
         if (error instanceof Error && error.message.includes('SAFEGUARD')) {
           const action = error.message.match(/SAFEGUARD:(\w+):/)?.[1] ?? 'pause';
-          console.log(`🚨 SAFEGUARD activado para bot ${botId} — acción: ${action}`);
+          log.info(`🚨 SAFEGUARD activado para bot ${botId} — acción: ${action}`);
           try {
             if (action === 'pause_close') {
               await this.closeBot(botId);
@@ -767,7 +770,7 @@ export class GridEngine extends EventEmitter {
               await this.pauseBot(botId);
             }
           } catch (pauseErr) {
-            console.error(`❌ Error ejecutando acción safeguard ${action} para bot ${botId}:`, pauseErr);
+            log.error({ err: (pauseErr as Error).message }, `❌ Error ejecutando acción safeguard ${action} para bot ${botId}:`);
           }
           this.emit('safeguardTriggered', {
             botId,
@@ -833,10 +836,10 @@ export class GridEngine extends EventEmitter {
     }
     canonicalQty = Math.round(canonicalQty * 100) / 100;
 
-    console.log(`🧮 Grid calculation: ${config.numGrids} grids = ${config.numGrids + 1} niveles`);
-    console.log(`🧮 Rango: $${config.lowerPrice} - $${config.upperPrice}`);
-    console.log(`🧮 Spacing: $${spacing.toFixed(2)} por nivel`);
-    console.log(`🧮 Canonical qty per level: ${canonicalQty} ETH (effCap $${effCap.toFixed(2)} / ${config.numGrids} grids / $${midPrice} mid)`);
+    log.info(`🧮 Grid calculation: ${config.numGrids} grids = ${config.numGrids + 1} niveles`);
+    log.info(`🧮 Rango: $${config.lowerPrice} - $${config.upperPrice}`);
+    log.info(`🧮 Spacing: $${spacing.toFixed(2)} por nivel`);
+    log.info(`🧮 Canonical qty per level: ${canonicalQty} ETH (effCap $${effCap.toFixed(2)} / ${config.numGrids} grids / $${midPrice} mid)`);
 
     // Generate level 0..numGrids = numGrids+1 levels. Every level
     // gets the SAME canonicalQty so the grid is constant-quantity.
@@ -861,7 +864,7 @@ export class GridEngine extends EventEmitter {
 
     const quantityPerGrid = canonicalQty;
 
-    console.log(`🧮 Generados ${gridLevels.length} niveles (0 a ${config.numGrids})`);
+    log.info(`🧮 Generados ${gridLevels.length} niveles (0 a ${config.numGrids})`);
 
     // Calcular profit estimado por grid
     const estimatedProfitPerGrid = spacing * quantityPerGrid;
@@ -871,7 +874,7 @@ export class GridEngine extends EventEmitter {
     try {
       liquidationPrice = parseFloat(await client.calculateLiquidationPrice(config.pair, config.leverage));
     } catch (e) {
-      console.log(`⚠️ No se pudo calcular liquidation price: ${(e as Error).message}`);
+      log.info(`⚠️ No se pudo calcular liquidation price: ${(e as Error).message}`);
       // Estimación simple: entry / leverage para long
       if (config.direction === 'long') {
         liquidationPrice = currentPrice * (1 - 1/config.leverage) * 0.95;
@@ -924,7 +927,7 @@ export class GridEngine extends EventEmitter {
       throw new Error(`Con $${config.investmentUSDT} de inversión, máximo ${maxGrids} grids (mín $${minNotional} por grid para ${config.pair})`);
     }
 
-    console.log(`✅ [DEBUG] Configuración validada: ${config.numGrids} grids x $${investmentPerGrid.toFixed(2)} cada uno >= $${minNotional} min_notional`);
+    log.info(`✅ [DEBUG] Configuración validada: ${config.numGrids} grids x $${investmentPerGrid.toFixed(2)} cada uno >= $${minNotional} min_notional`);
   }
 
   /**
@@ -945,7 +948,7 @@ export class GridEngine extends EventEmitter {
     
     const requiredMargin = bot.investment_usdt / bot.leverage;
     
-    console.log(`💰 [DEBUG] Validando balance: disponible $${availableBalance}, requerido $${requiredMargin}`);
+    log.info(`💰 [DEBUG] Validando balance: disponible $${availableBalance}, requerido $${requiredMargin}`);
     
     if (availableBalance < requiredMargin) {
       throw new Error(`Balance insuficiente: requerido $${requiredMargin.toFixed(2)}, disponible $${availableBalance.toFixed(2)}`);
@@ -958,7 +961,7 @@ export class GridEngine extends EventEmitter {
       throw new Error(`Inversión muy alta: máximo recomendado $${maxInvestment.toFixed(2)} (95% del balance total)`);
     }
     
-    console.log(`✅ [DEBUG] Balance validado: margen OK, inversión dentro de límites seguros`);
+    log.info(`✅ [DEBUG] Balance validado: margen OK, inversión dentro de límites seguros`);
   }
 
   /**
@@ -989,11 +992,11 @@ export class GridEngine extends EventEmitter {
    */
   private async pollFundingHistory(): Promise<void> {
     try {
-      console.log(`💰 [DEBUG] Polling funding history...`);
+      log.info(`💰 [DEBUG] Polling funding history...`);
 
       const activeBots = await db.getBotsByStatus('running');
       if (activeBots.length === 0) {
-        console.log(`💰 [DEBUG] No hay bots activos, skipping funding poll`);
+        log.info(`💰 [DEBUG] No hay bots activos, skipping funding poll`);
         return;
       }
 
@@ -1004,11 +1007,11 @@ export class GridEngine extends EventEmitter {
       // user B's bot.
       for (const bot of activeBots) {
         try {
-          console.log(`💰 [DEBUG] Polling funding para bot ${bot.id} (${bot.pair})...`);
+          log.info(`💰 [DEBUG] Polling funding para bot ${bot.id} (${bot.pair})...`);
 
           const client = await this.getClientForBot(bot);
           const fundingPayments = await client.getFundingHistory(50, bot.pair);
-          console.log(`💰 [DEBUG] Bot ${bot.id}: ${fundingPayments.length} funding payments`);
+          log.info(`💰 [DEBUG] Bot ${bot.id}: ${fundingPayments.length} funding payments`);
 
           // Obtener último funding time registrado para evitar duplicados
           const existingFunding = await db.getFundingHistoryByBot(bot.id);
@@ -1020,7 +1023,7 @@ export class GridEngine extends EventEmitter {
             payment.funding_time * 1000 > lastFundingTime
           );
 
-          console.log(`💰 [DEBUG] Bot ${bot.id}: ${newPayments.length} nuevos funding payments`);
+          log.info(`💰 [DEBUG] Bot ${bot.id}: ${newPayments.length} nuevos funding payments`);
 
           for (const payment of newPayments) {
             try {
@@ -1036,10 +1039,10 @@ export class GridEngine extends EventEmitter {
                 funding_time: new Date(payment.funding_time * 1000).toISOString()
               });
 
-              console.log(`💰 [DEBUG] Funding registrado para bot ${bot.id}: ${paymentUsdt.toFixed(4)} USDT`);
+              log.info(`💰 [DEBUG] Funding registrado para bot ${bot.id}: ${paymentUsdt.toFixed(4)} USDT`);
 
             } catch (fundingErr) {
-              console.error(`❌ Error registrando funding para bot ${bot.id}:`, fundingErr);
+              log.error({ err: (fundingErr as Error).message }, `❌ Error registrando funding para bot ${bot.id}:`);
             }
           }
 
@@ -1047,14 +1050,14 @@ export class GridEngine extends EventEmitter {
           await new Promise(r => setTimeout(r, 1000));
 
         } catch (botErr) {
-          console.error(`❌ Error polling funding para bot ${bot.id}:`, botErr);
+          log.error({ err: (botErr as Error).message }, `❌ Error polling funding para bot ${bot.id}:`);
         }
       }
 
-      console.log(`✅ Funding history polling completado`);
+      log.info(`✅ Funding history polling completado`);
 
     } catch (error) {
-      console.error(`❌ Error en polling funding history:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error en polling funding history:`);
     }
   }
 
@@ -1063,23 +1066,23 @@ export class GridEngine extends EventEmitter {
    */
   private async backfillFundingHistory(): Promise<void> {
     try {
-      console.log(`🔄 [DEBUG] Iniciando backfill de funding history...`);
+      log.info(`🔄 [DEBUG] Iniciando backfill de funding history...`);
 
       const allBots = await db.getAllBots();
       if (allBots.length === 0) {
-        console.log(`🔄 [DEBUG] No hay bots, skipping backfill`);
+        log.info(`🔄 [DEBUG] No hay bots, skipping backfill`);
         return;
       }
 
       // Multi-tenant: one backfill per bot, using the owner's client.
       for (const bot of allBots) {
         try {
-          console.log(`🔄 [DEBUG] Backfill funding para bot ${bot.id} (${bot.pair})...`);
+          log.info(`🔄 [DEBUG] Backfill funding para bot ${bot.id} (${bot.pair})...`);
 
           const client = await this.getClientForBot(bot);
           // Obtener todo el funding history disponible (últimos 500)
           const allFunding = await client.getFundingHistory(500, bot.pair);
-          console.log(`🔄 [DEBUG] Bot ${bot.id}: total funding history disponible: ${allFunding.length}`);
+          log.info(`🔄 [DEBUG] Bot ${bot.id}: total funding history disponible: ${allFunding.length}`);
 
           const botCreatedTime = new Date(bot.created_at).getTime();
 
@@ -1088,7 +1091,7 @@ export class GridEngine extends EventEmitter {
             payment.funding_time * 1000 >= botCreatedTime
           );
 
-          console.log(`🔄 [DEBUG] Bot ${bot.id}: ${relevantFunding.length} funding payments relevantes`);
+          log.info(`🔄 [DEBUG] Bot ${bot.id}: ${relevantFunding.length} funding payments relevantes`);
 
           for (const payment of relevantFunding) {
             try {
@@ -1113,24 +1116,24 @@ export class GridEngine extends EventEmitter {
               });
 
             } catch (recordErr) {
-              console.error(`❌ Error registrando funding record:`, recordErr);
+              log.error({ err: (recordErr as Error).message }, `❌ Error registrando funding record:`);
             }
           }
 
-          console.log(`🔄 [DEBUG] Backfill completado para bot ${bot.id}`);
+          log.info(`🔄 [DEBUG] Backfill completado para bot ${bot.id}`);
 
           // Throttle between bots
           await new Promise(r => setTimeout(r, 2000));
 
         } catch (botErr) {
-          console.error(`❌ Error backfill funding para bot ${bot.id}:`, botErr);
+          log.error({ err: (botErr as Error).message }, `❌ Error backfill funding para bot ${bot.id}:`);
         }
       }
 
-      console.log(`✅ Funding history backfill completado`);
+      log.info(`✅ Funding history backfill completado`);
 
     } catch (error) {
-      console.error(`❌ Error en backfill funding history:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error en backfill funding history:`);
     }
   }
 
@@ -1161,7 +1164,7 @@ export class GridEngine extends EventEmitter {
         const availableProfit = gridProfitTotal - alreadyCompounded;
 
         if (availableProfit < threshold) {
-          console.log(`📊 Compound bot ${bot.id}: $${availableProfit.toFixed(2)} available < $${threshold} threshold — skip`);
+          log.info(`📊 Compound bot ${bot.id}: $${availableProfit.toFixed(2)} available < $${threshold} threshold — skip`);
           continue;
         }
 
@@ -1172,8 +1175,8 @@ export class GridEngine extends EventEmitter {
         const newQty = computeQtyPerLevel(newInvestment, bot.leverage, bot.num_grids, midPrice, bot.pair);
         const oldQty = bot.quantity_per_level || 0;
 
-        console.log(`🔄 Compound bot ${bot.id}: +$${compoundAmount.toFixed(2)} (${pct}% of $${availableProfit.toFixed(2)} profit)`);
-        console.log(`   investment: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}, qty: ${oldQty} → ${newQty}`);
+        log.info(`🔄 Compound bot ${bot.id}: +$${compoundAmount.toFixed(2)} (${pct}% of $${availableProfit.toFixed(2)} profit)`);
+        log.info(`   investment: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}, qty: ${oldQty} → ${newQty}`);
 
         // Atomic DB update: bump investment AND qty_per_level together.
         // New orders placed by monitor() will use the new qty. Existing
@@ -1193,11 +1196,11 @@ export class GridEngine extends EventEmitter {
           notes: `${pct}% of $${availableProfit.toFixed(2)} grid profit (lifetime $${gridProfitTotal.toFixed(2)}, qty ${oldQty}→${newQty})`,
         });
 
-        console.log(`✅ Bot ${bot.id} compounded: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}`);
+        log.info(`✅ Bot ${bot.id} compounded: $${bot.investment_usdt.toFixed(2)} → $${newInvestment.toFixed(2)}`);
       }
 
     } catch (error) {
-      console.error(`❌ Error en compound rebalance:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error en compound rebalance:`);
     }
   }
 
@@ -1258,7 +1261,7 @@ export class GridEngine extends EventEmitter {
     // No-op short-circuit. The plan builder already detected this and
     // returned `noop: true`; we just exit cleanly.
     if (plan.noop) {
-      console.log(`⚪ Range unchanged for bot ${botId} — no-op`);
+      log.info(`⚪ Range unchanged for bot ${botId} — no-op`);
       return;
     }
 
@@ -1471,16 +1474,16 @@ export class GridEngine extends EventEmitter {
     // so range updates on user A's bot never touch user B's sub-account.
     const client = await this.getClientForBot(bot);
 
-    console.log(
+    log.info(
       `🔄 Updating range for bot ${plan.botId}: $${plan.currentRange.lower}-$${plan.currentRange.upper} → $${plan.newRange.lower}-$${plan.newRange.upper}`
     );
-    console.log(
+    log.info(
       `📊 Plan: ${plan.newTotalLevels} levels (${plan.newBuyLevels} buys, ${plan.newSellLevels} sells), need ${plan.ethNeeded.toFixed(4)} ETH, position ${plan.currentPosition.toFixed(4)} ETH, deficit ${plan.ethDeficit.toFixed(4)} ETH`
     );
 
     // Step 1: ETH auto-purchase
     if (plan.autoBuy) {
-      console.log(
+      log.info(
         `💰 Market-buying ${plan.autoBuy.size.toFixed(4)} ETH at ~$${plan.autoBuy.estimatedPrice} (deficit fill)`
       );
 
@@ -1497,7 +1500,7 @@ export class GridEngine extends EventEmitter {
         },
         true
       );
-      console.log(`💰 Auto-buy order id ${buyOrder.order_id} sent`);
+      log.info(`💰 Auto-buy order id ${buyOrder.order_id} sent`);
 
       // Wait for fill, verify, fail loud if short.
       await new Promise((r) => setTimeout(r, 2000));
@@ -1506,7 +1509,7 @@ export class GridEngine extends EventEmitter {
         const updatedPos = await client.getPosition(bot.pair);
         if (updatedPos) postPosition = parseFloat(updatedPos.size);
       } catch (e) {
-        console.log(
+        log.info(
           `⚠️ Could not verify position after auto-buy: ${(e as Error).message}`
         );
       }
@@ -1515,7 +1518,7 @@ export class GridEngine extends EventEmitter {
           `Auto-buy fill incomplete: position ${postPosition.toFixed(4)} ETH < needed ${plan.ethNeeded.toFixed(4)} ETH. Aborting before DB write.`
         );
       }
-      console.log(
+      log.info(
         `✅ Auto-buy filled. Position now ${postPosition.toFixed(4)} ETH`
       );
     }
@@ -1533,9 +1536,9 @@ export class GridEngine extends EventEmitter {
           .map((l) => ({ order_id: l.order_id!, price: l.price }))) {
       try {
         await client.cancelOrder(orderRef.order_id, bot.pair);
-        console.log(`🗑️ Cancelled order ${orderRef.order_id} @ $${orderRef.price}`);
+        log.info(`🗑️ Cancelled order ${orderRef.order_id} @ $${orderRef.price}`);
       } catch (cancelErr) {
-        console.log(
+        log.info(
           `⚠️ Could not cancel order ${orderRef.order_id}: ${(cancelErr as Error).message}`
         );
       }
@@ -1543,7 +1546,7 @@ export class GridEngine extends EventEmitter {
 
     // Step 3: Atomic DB replacement of all grid_levels.
     await db.replaceAllGridLevels(plan.botId, plan.newLevels);
-    console.log(
+    log.info(
       `🔁 Replaced grid_levels: ${plan.newLevels.length} fresh rows committed`
     );
 
@@ -1567,17 +1570,17 @@ export class GridEngine extends EventEmitter {
       for (const level of newLevelsFromDb) {
         try {
           await instance.placeGridOrder(level);
-          console.log(`✅ Placed: ${level.side} @ $${level.price}`);
+          log.info(`✅ Placed: ${level.side} @ $${level.price}`);
           await new Promise((r) => setTimeout(r, 500)); // throttle
         } catch (placeErr) {
-          console.error(
+          log.error(
             `❌ Failed to place order @ $${level.price}: ${(placeErr as Error).message}`
           );
         }
       }
     }
 
-    console.log(`✅ Range update completed for bot ${plan.botId}`);
+    log.info(`✅ Range update completed for bot ${plan.botId}`);
   }
 
   /**
@@ -1627,7 +1630,7 @@ export class GridEngine extends EventEmitter {
       try {
         allFills = await client.getFillHistory(1000, instrument);
       } catch (err) {
-        console.warn(`⚠️ Fill poller [bot ${botId} ${instrument}]: getFillHistory failed: ${(err as Error).message}`);
+        log.warn(`⚠️ Fill poller [bot ${botId} ${instrument}]: getFillHistory failed: ${(err as Error).message}`);
         continue;
       }
       if (!Array.isArray(allFills) || allFills.length === 0) continue;
@@ -1658,7 +1661,7 @@ export class GridEngine extends EventEmitter {
     }
 
     for (const [label, c] of counts) {
-      console.log(
+      log.info(
         `📥 Fill archive [${label}]: +${c.added} new (fee sum ${c.feeSum.toFixed(6)} USDT, ${c.feeSum < 0 ? 'rebate earned' : 'fees paid'})`
       );
     }
@@ -1721,7 +1724,7 @@ export class GridBotInstance {
 
   async loadGridLevels(): Promise<void> {
     this.gridLevels = await db.getGridLevels(this.bot.id);
-    console.log(`📊 Bot ${this.bot.id}: ${this.gridLevels.length} grid levels cargados`);
+    log.info(`📊 Bot ${this.bot.id}: ${this.gridLevels.length} grid levels cargados`);
   }
 
   getGridLevels(): GridLevel[] {
@@ -1773,19 +1776,19 @@ export class GridBotInstance {
    * Colocar órdenes iniciales según la estrategia de grid (con compra inicial para LONG)
    */
   async placeInitialOrders(): Promise<void> {
-    console.log(`🚀 [DEBUG] Bot ${this.bot.id}: INICIANDO placeInitialOrders()`);
+    log.info(`🚀 [DEBUG] Bot ${this.bot.id}: INICIANDO placeInitialOrders()`);
     
     // Cargar niveles de grid
     this.gridLevels = await db.getGridLevels(this.bot.id);
-    console.log(`🔍 [DEBUG] Bot ${this.bot.id}: Cargados ${this.gridLevels.length} niveles de grid`);
+    log.info(`🔍 [DEBUG] Bot ${this.bot.id}: Cargados ${this.gridLevels.length} niveles de grid`);
     
     // Obtener precio actual
     const ticker = await this.grvt.getTicker(this.bot.pair);
     const currentPrice = parseFloat(ticker.last_price);
 
-    console.log(`📊 Bot ${this.bot.id}: Precio actual ${this.bot.pair}: $${currentPrice}`);
-    console.log(`📊 Bot ${this.bot.id}: Estrategia ${this.bot.direction.toUpperCase()} con ${this.gridLevels.length} niveles`);
-    console.log(`📊 Bot ${this.bot.id}: Rango: $${this.gridLevels[0]?.price} - $${this.gridLevels[this.gridLevels.length - 1]?.price}`);
+    log.info(`📊 Bot ${this.bot.id}: Precio actual ${this.bot.pair}: $${currentPrice}`);
+    log.info(`📊 Bot ${this.bot.id}: Estrategia ${this.bot.direction.toUpperCase()} con ${this.gridLevels.length} niveles`);
+    log.info(`📊 Bot ${this.bot.id}: Rango: $${this.gridLevels[0]?.price} - $${this.gridLevels[this.gridLevels.length - 1]?.price}`);
     
     // ⚠️ PASO 1: COMPRA INICIAL para bots LONG
     if (this.bot.direction === 'long') {
@@ -1794,7 +1797,7 @@ export class GridBotInstance {
 
     // ⚠️ DRY RUN warning
     if (process.env.DRY_RUN === 'true') {
-      console.log(`🧪 [DRY RUN] Bot ${this.bot.id}: Modo testing activado - NO se colocarán órdenes reales`);
+      log.info(`🧪 [DRY RUN] Bot ${this.bot.id}: Modo testing activado - NO se colocarán órdenes reales`);
     }
 
     let ordersToPlace = 0;
@@ -1803,43 +1806,43 @@ export class GridBotInstance {
 
     // ⚠️ PASO 2: Colocar órdenes limit según la dirección
     for (const level of this.gridLevels) {
-      console.log(`🔍 [DEBUG] Bot ${this.bot.id}: Evaluando nivel ${level.level_index}: ${level.side} ${level.quantity} @ $${level.price} (filled: ${level.is_filled})`);
+      log.info(`🔍 [DEBUG] Bot ${this.bot.id}: Evaluando nivel ${level.level_index}: ${level.side} ${level.quantity} @ $${level.price} (filled: ${level.is_filled})`);
       
       if (level.is_filled) {
         ordersSkipped++;
-        console.log(`⏭️ [DEBUG] Bot ${this.bot.id}: Nivel ${level.level_index} ya está filled, saltando`);
+        log.info(`⏭️ [DEBUG] Bot ${this.bot.id}: Nivel ${level.level_index} ya está filled, saltando`);
         continue;
       }
 
       const shouldPlace = this.shouldPlaceOrder(level, currentPrice);
-      console.log(`🤔 [DEBUG] Bot ${this.bot.id}: Nivel ${level.level_index} shouldPlace: ${shouldPlace} (current: $${currentPrice}, level: $${level.price}, side: ${level.side})`);
+      log.info(`🤔 [DEBUG] Bot ${this.bot.id}: Nivel ${level.level_index} shouldPlace: ${shouldPlace} (current: $${currentPrice}, level: $${level.price}, side: ${level.side})`);
       
       if (shouldPlace) {
         ordersToPlace++;
-        console.log(`📝 [DEBUG] Bot ${this.bot.id}: Colocando orden nivel ${level.level_index}...`);
+        log.info(`📝 [DEBUG] Bot ${this.bot.id}: Colocando orden nivel ${level.level_index}...`);
         try {
           await this.placeGridOrder(level);
           ordersPlaced++;
-          console.log(`✅ [DEBUG] Bot ${this.bot.id}: Orden nivel ${level.level_index} colocada exitosamente`);
+          log.info(`✅ [DEBUG] Bot ${this.bot.id}: Orden nivel ${level.level_index} colocada exitosamente`);
           // Throttle: 200ms entre órdenes para evitar rate limit GRVT
           await new Promise(r => setTimeout(r, 200));
         } catch (error) {
-          console.error(`❌ [DEBUG] Error colocando orden nivel ${level.level_index}:`, error);
+          log.error({ err: (error as Error).message }, `❌ [DEBUG] Error colocando orden nivel ${level.level_index}:`);
         }
       } else {
-        console.log(`❌ [DEBUG] Bot ${this.bot.id}: Nivel ${level.level_index} NO cumple condiciones para colocar`);
+        log.info(`❌ [DEBUG] Bot ${this.bot.id}: Nivel ${level.level_index} NO cumple condiciones para colocar`);
       }
     }
 
-    console.log(`✅ [DEBUG] Bot ${this.bot.id}: RESUMEN - ${ordersPlaced}/${ordersToPlace} órdenes ${process.env.DRY_RUN === 'true' ? '(simuladas)' : 'colocadas'}, ${ordersSkipped} saltadas`);
-    console.log(`🎯 [DEBUG] Bot ${this.bot.id}: TERMINADO placeInitialOrders()`);
+    log.info(`✅ [DEBUG] Bot ${this.bot.id}: RESUMEN - ${ordersPlaced}/${ordersToPlace} órdenes ${process.env.DRY_RUN === 'true' ? '(simuladas)' : 'colocadas'}, ${ordersSkipped} saltadas`);
+    log.info(`🎯 [DEBUG] Bot ${this.bot.id}: TERMINADO placeInitialOrders()`);
   }
 
   /**
    * NUEVO: Ejecutar compra inicial para grid LONG
    */
   private async executeInitialPurchase(currentPrice: number): Promise<void> {
-    console.log(`💰 [DEBUG] Bot ${this.bot.id}: INICIANDO compra inicial para estrategia LONG`);
+    log.info(`💰 [DEBUG] Bot ${this.bot.id}: INICIANDO compra inicial para estrategia LONG`);
 
     // Calcular niveles SELL arriba del precio actual
     const sellLevelsAbove = this.gridLevels.filter(level => 
@@ -1847,7 +1850,7 @@ export class GridBotInstance {
     ).sort((a, b) => a.price - b.price);
 
     if (sellLevelsAbove.length === 0) {
-      console.log(`⚠️ [DEBUG] Bot ${this.bot.id}: No hay niveles SELL arriba del precio actual, saltando compra inicial`);
+      log.info(`⚠️ [DEBUG] Bot ${this.bot.id}: No hay niveles SELL arriba del precio actual, saltando compra inicial`);
       return;
     }
 
@@ -1855,20 +1858,20 @@ export class GridBotInstance {
     const totalQuantityNeeded = sellLevelsAbove.reduce((sum, level) => sum + level.quantity, 0);
     const notionalUSDT = totalQuantityNeeded * currentPrice;
 
-    console.log(`💰 [DEBUG] Bot ${this.bot.id}: Niveles SELL arriba: ${sellLevelsAbove.length}`);
-    console.log(`💰 [DEBUG] Bot ${this.bot.id}: Cantidad total necesaria: ${totalQuantityNeeded} ETH`);
-    console.log(`💰 [DEBUG] Bot ${this.bot.id}: Notional USDT: $${notionalUSDT.toFixed(2)}`);
+    log.info(`💰 [DEBUG] Bot ${this.bot.id}: Niveles SELL arriba: ${sellLevelsAbove.length}`);
+    log.info(`💰 [DEBUG] Bot ${this.bot.id}: Cantidad total necesaria: ${totalQuantityNeeded} ETH`);
+    log.info(`💰 [DEBUG] Bot ${this.bot.id}: Notional USDT: $${notionalUSDT.toFixed(2)}`);
 
     // Validar min_notional
     const minNotional = this.bot.pair === 'ETH_USDT_Perp' ? 20 : 100;
     if (notionalUSDT < minNotional) {
-      console.log(`⚠️ [DEBUG] Bot ${this.bot.id}: Notional $${notionalUSDT.toFixed(2)} < min_notional $${minNotional}, saltando compra inicial`);
+      log.info(`⚠️ [DEBUG] Bot ${this.bot.id}: Notional $${notionalUSDT.toFixed(2)} < min_notional $${minNotional}, saltando compra inicial`);
       return;
     }
 
     try {
       if (process.env.DRY_RUN === 'true') {
-        console.log(`🧪 [DRY RUN] Bot ${this.bot.id}: COMPRA INICIAL que se ejecutaría: BUY ${totalQuantityNeeded} ${this.bot.pair} @ MARKET [notional: $${notionalUSDT.toFixed(2)}]`);
+        log.info(`🧪 [DRY RUN] Bot ${this.bot.id}: COMPRA INICIAL que se ejecutaría: BUY ${totalQuantityNeeded} ${this.bot.pair} @ MARKET [notional: $${notionalUSDT.toFixed(2)}]`);
         
         // En dry run, simular la compra
         await db.updateBot(this.bot.id, {
@@ -1876,12 +1879,12 @@ export class GridBotInstance {
           avg_entry_price: currentPrice
         });
         
-        console.log(`✅ [DRY RUN] Bot ${this.bot.id}: Compra inicial simulada exitosamente`);
+        log.info(`✅ [DRY RUN] Bot ${this.bot.id}: Compra inicial simulada exitosamente`);
         return;
       }
 
       // 💰 MODO REAL: Ejecutar compra market usando IOC
-      console.log(`💰 [REAL] Bot ${this.bot.id}: Ejecutando compra inicial MARKET...`);
+      log.info(`💰 [REAL] Bot ${this.bot.id}: Ejecutando compra inicial MARKET...`);
 
       // Usar precio ligeramente arriba del ask para asegurar fill
       const ticker = await this.grvt.getTicker(this.bot.pair);
@@ -1899,7 +1902,7 @@ export class GridBotInstance {
         metadata: `initial_purchase_${this.bot.id}`
       }, true); // allowMarket=true
 
-      console.log(`💰 [REAL] Bot ${this.bot.id}: Compra inicial enviada: ${order.order_id}`);
+      log.info(`💰 [REAL] Bot ${this.bot.id}: Compra inicial enviada: ${order.order_id}`);
 
       // Esperar un momento para que se ejecute
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -1914,7 +1917,7 @@ export class GridBotInstance {
         const totalFilled = initialFills.reduce((sum, fill) => sum + parseFloat(fill.size), 0);
         const avgPrice = initialFills.reduce((sum, fill) => sum + parseFloat(fill.price) * parseFloat(fill.size), 0) / totalFilled;
 
-        console.log(`✅ [REAL] Bot ${this.bot.id}: Compra inicial ejecutada: ${totalFilled} ETH @ $${avgPrice.toFixed(2)}`);
+        log.info(`✅ [REAL] Bot ${this.bot.id}: Compra inicial ejecutada: ${totalFilled} ETH @ $${avgPrice.toFixed(2)}`);
 
         // Actualizar posición del bot
         await db.updateBot(this.bot.id, {
@@ -1936,7 +1939,7 @@ export class GridBotInstance {
           });
         }
       } else {
-        console.log(`⚠️ [REAL] Bot ${this.bot.id}: Compra inicial no se ejecutó completamente, continuando con órdenes limit`);
+        log.info(`⚠️ [REAL] Bot ${this.bot.id}: Compra inicial no se ejecutó completamente, continuando con órdenes limit`);
       }
 
       // IMPORTANTE: Colocar SELL en el nivel justo arriba del precio de entry
@@ -1946,18 +1949,18 @@ export class GridBotInstance {
         .sort((a, b) => a.price - b.price)[0];
       
       if (entryLevel) {
-        console.log(`📍 [DEBUG] Bot ${this.bot.id}: Colocando SELL en nivel de entry $${entryLevel.price} (cierra gap)`);
+        log.info(`📍 [DEBUG] Bot ${this.bot.id}: Colocando SELL en nivel de entry $${entryLevel.price} (cierra gap)`);
         try {
           const entryOrder = { ...entryLevel, side: 'sell' as const };
           await this.placeGridOrder(entryOrder);
-          console.log(`✅ Bot ${this.bot.id}: SELL de entry colocada en $${entryLevel.price}`);
+          log.info(`✅ Bot ${this.bot.id}: SELL de entry colocada en $${entryLevel.price}`);
         } catch (err) {
-          console.log(`⚠️ Bot ${this.bot.id}: No se pudo colocar SELL de entry: ${err}`);
+          log.info(`⚠️ Bot ${this.bot.id}: No se pudo colocar SELL de entry: ${err}`);
         }
       }
 
     } catch (error) {
-      console.error(`❌ [DEBUG] Error en compra inicial para bot ${this.bot.id}:`, error);
+      log.error({ err: (error as Error).message }, `❌ [DEBUG] Error en compra inicial para bot ${this.bot.id}:`);
       throw error;
     }
   }
@@ -1966,8 +1969,8 @@ export class GridBotInstance {
    * Determinar si debe colocarse una orden en este nivel
    */
   private shouldPlaceOrder(level: GridLevel, currentPrice: number): boolean {
-    console.log(`🧐 [DEBUG] shouldPlaceOrder() - Bot: ${this.bot.id}, Level: ${level.level_index}, Direction: ${this.bot.direction}`);
-    console.log(`🧐 [DEBUG] shouldPlaceOrder() - Level: ${level.side} @ $${level.price}, Current: $${currentPrice}`);
+    log.info(`🧐 [DEBUG] shouldPlaceOrder() - Bot: ${this.bot.id}, Level: ${level.level_index}, Direction: ${this.bot.direction}`);
+    log.info(`🧐 [DEBUG] shouldPlaceOrder() - Level: ${level.side} @ $${level.price}, Current: $${currentPrice}`);
     
     let result = false;
     
@@ -1977,9 +1980,9 @@ export class GridBotInstance {
       const sellCondition = level.side === 'sell' && level.price > currentPrice;
       result = buyCondition || sellCondition;
       
-      console.log(`🧐 [DEBUG] shouldPlaceOrder() LONG - buyCondition: ${buyCondition} (${level.side}==='buy' && ${level.price}<${currentPrice})`);
-      console.log(`🧐 [DEBUG] shouldPlaceOrder() LONG - sellCondition: ${sellCondition} (${level.side}==='sell' && ${level.price}>${currentPrice})`);
-      console.log(`🧐 [DEBUG] shouldPlaceOrder() LONG - result: ${result}`);
+      log.info(`🧐 [DEBUG] shouldPlaceOrder() LONG - buyCondition: ${buyCondition} (${level.side}==='buy' && ${level.price}<${currentPrice})`);
+      log.info(`🧐 [DEBUG] shouldPlaceOrder() LONG - sellCondition: ${sellCondition} (${level.side}==='sell' && ${level.price}>${currentPrice})`);
+      log.info(`🧐 [DEBUG] shouldPlaceOrder() LONG - result: ${result}`);
       
     } else {
       // SHORT: sell orders arriba del precio, buy orders debajo  
@@ -1987,9 +1990,9 @@ export class GridBotInstance {
       const buyCondition = level.side === 'buy' && level.price < currentPrice;
       result = sellCondition || buyCondition;
       
-      console.log(`🧐 [DEBUG] shouldPlaceOrder() SHORT - sellCondition: ${sellCondition} (${level.side}==='sell' && ${level.price}>${currentPrice})`);
-      console.log(`🧐 [DEBUG] shouldPlaceOrder() SHORT - buyCondition: ${buyCondition} (${level.side}==='buy' && ${level.price}<${currentPrice})`);
-      console.log(`🧐 [DEBUG] shouldPlaceOrder() SHORT - result: ${result}`);
+      log.info(`🧐 [DEBUG] shouldPlaceOrder() SHORT - sellCondition: ${sellCondition} (${level.side}==='sell' && ${level.price}>${currentPrice})`);
+      log.info(`🧐 [DEBUG] shouldPlaceOrder() SHORT - buyCondition: ${buyCondition} (${level.side}==='buy' && ${level.price}<${currentPrice})`);
+      log.info(`🧐 [DEBUG] shouldPlaceOrder() SHORT - result: ${result}`);
     }
     
     return result;
@@ -2000,8 +2003,8 @@ export class GridBotInstance {
    * ⚠️ ACTUALIZADO: usar nuevo createOrder con validación min_notional
    */
   async placeGridOrder(level: GridLevel): Promise<void> {
-    console.log(`📝 [DEBUG] placeGridOrder() INICIADO - Bot: ${this.bot.id}, Level: ${level.level_index}`);
-    console.log(`📝 [DEBUG] placeGridOrder() - Orden: ${level.side} ${level.quantity} ${this.bot.pair} @ $${level.price}`);
+    log.info(`📝 [DEBUG] placeGridOrder() INICIADO - Bot: ${this.bot.id}, Level: ${level.level_index}`);
+    log.info(`📝 [DEBUG] placeGridOrder() - Orden: ${level.side} ${level.quantity} ${this.bot.pair} @ $${level.price}`);
     
     try {
       // ⚠️ VALIDAR MIN_NOTIONAL antes de colocar orden
@@ -2009,20 +2012,20 @@ export class GridBotInstance {
       const minNotional = this.bot.pair === 'ETH_USDT_Perp' ? 20 : 100; // ETH: $20, BTC: $100
       
       if (notional < minNotional) {
-        console.log(`⚠️ [DEBUG] SKIP nivel ${level.level_index}: notional $${notional.toFixed(2)} < min_notional $${minNotional}`);
+        log.info(`⚠️ [DEBUG] SKIP nivel ${level.level_index}: notional $${notional.toFixed(2)} < min_notional $${minNotional}`);
         return;
       }
 
-      console.log(`✅ [DEBUG] Min_notional OK: $${notional.toFixed(2)} >= $${minNotional}`);
+      log.info(`✅ [DEBUG] Min_notional OK: $${notional.toFixed(2)} >= $${minNotional}`);
 
       // 🧪 DRY RUN MODE: Solo loguear las órdenes que se colocarían
       if (process.env.DRY_RUN === 'true') {
-        console.log(`🧪 [DRY RUN] ORDEN QUE SE COLOCARÍA: ${level.side.toUpperCase()} ${level.quantity} ${this.bot.pair} @ $${level.price} (nivel ${level.level_index}) [notional: $${notional.toFixed(2)}]`);
+        log.info(`🧪 [DRY RUN] ORDEN QUE SE COLOCARÍA: ${level.side.toUpperCase()} ${level.quantity} ${this.bot.pair} @ $${level.price} (nivel ${level.level_index}) [notional: $${notional.toFixed(2)}]`);
         
         // En dry run, crear orden fake en database para testing
         const fakeOrderId = `dry_run_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         
-        console.log(`📝 [DEBUG] DRY RUN - Creando orden fake en DB: ${fakeOrderId}`);
+        log.info(`📝 [DEBUG] DRY RUN - Creando orden fake en DB: ${fakeOrderId}`);
         
         await db.createOrder({
           bot_id: this.bot.id,
@@ -2048,12 +2051,12 @@ export class GridBotInstance {
           metadata: `[DRY_RUN] grid_${this.bot.id}_${level.level_index}`
         } as any);
 
-        console.log(`✅ [DEBUG] DRY RUN - Orden fake creada exitosamente`);
+        log.info(`✅ [DEBUG] DRY RUN - Orden fake creada exitosamente`);
         return;
       }
 
       // 💰 MODO REAL: Colocar orden en GRVT usando nuevo formato
-      console.log(`💰 [DEBUG] REAL MODE - Enviando orden a GRVT con nuevo createOrder...`);
+      log.info(`💰 [DEBUG] REAL MODE - Enviando orden a GRVT con nuevo createOrder...`);
       
       const order = await this.grvt.createOrder({
         sub_account_id: process.env.GRVT_TRADING_ACCOUNT_ID!,
@@ -2067,7 +2070,7 @@ export class GridBotInstance {
         metadata: `grid_${this.bot.id}_${level.level_index}`
       });
 
-      console.log(`💰 [DEBUG] REAL MODE - Respuesta de GRVT createOrder:`, order);
+      log.info({ order }, 'REAL MODE - Respuesta de GRVT createOrder');
 
       // Si GRVT devuelve 0x00, buscar el order_id real en open_orders
       let realOrderId = order.order_id;
@@ -2083,16 +2086,16 @@ export class GridBotInstance {
         });
         if (match) {
           realOrderId = match.order_id;
-          console.log(`[0x00 FIX] Replaced 0x00 with real order_id: ${realOrderId.slice(0,20)}... @ $${level.price}`);
+          log.info(`[0x00 FIX] Replaced 0x00 with real order_id: ${realOrderId.slice(0,20)}... @ $${level.price}`);
         } else {
           realOrderId = `temp_${Date.now()}_${level.price}_${Math.random().toString(36).slice(2,8)}`;
-          console.log(`[0x00 FIX] Generated temp ID: ${realOrderId} for $${level.price}`);
+          log.info(`[0x00 FIX] Generated temp ID: ${realOrderId} for $${level.price}`);
         }
       }
 
       // Guardar realOrderId en database, NO order.order_id
       const uniqueOrderId = order.metadata || `grid_${this.bot.id}_${level.level_index}_${Date.now()}`;
-      console.log(`📝 [DEBUG] REAL MODE - Guardando orden en DB con real order_id: ${realOrderId}`);
+      log.info(`📝 [DEBUG] REAL MODE - Guardando orden en DB con real order_id: ${realOrderId}`);
       await db.createOrder({
         bot_id: this.bot.id,
         order_id: realOrderId,
@@ -2117,22 +2120,22 @@ export class GridBotInstance {
         metadata: uniqueOrderId
       } as any);
 
-      console.log(`📝 ✅ Orden creada: ${level.side} ${level.quantity} ${this.bot.pair} @ $${level.price} (ID: ${realOrderId}) [notional: $${notional.toFixed(2)}]`);
+      log.info(`📝 ✅ Orden creada: ${level.side} ${level.quantity} ${this.bot.pair} @ $${level.price} (ID: ${realOrderId}) [notional: $${notional.toFixed(2)}]`);
 
     } catch (error) {
-      console.error(`❌ [DEBUG] Error colocando orden en nivel ${level.level_index}:`, error);
-      console.error(`❌ [DEBUG] Error stack:`, error instanceof Error ? error.stack : String(error));
+      log.error({ err: (error as Error).message }, `❌ [DEBUG] Error colocando orden en nivel ${level.level_index}:`);
+      log.error({ stack: error instanceof Error ? error.stack : String(error) }, 'Error stack');
       
       // ⚠️ NUEVO: Capturar error 7201 específicamente
       if (error instanceof Error && error.message.includes('7201')) {
-        console.log(`⏸️ Nivel ${level.level_index} ($${level.price}) fuera del price band — pendiente hasta que el precio se acerque`);
+        log.info(`⏸️ Nivel ${level.level_index} ($${level.price}) fuera del price band — pendiente hasta que el precio se acerque`);
         await db.markLevelPendingReplace(level.id);
         return; // NO reintentar, NO propagar como error fatal
       }
       
       // Si el error es min_notional, no propagarlo como error fatal
       if (error instanceof Error && error.message.includes('min_notional')) {
-        console.log(`⚠️ [DEBUG] Min_notional error - skipping nivel ${level.level_index}`);
+        log.info(`⚠️ [DEBUG] Min_notional error - skipping nivel ${level.level_index}`);
         return;
       }
       
@@ -2227,12 +2230,12 @@ export class GridBotInstance {
     // Sort by distance: closest = natural gap, rest = need orders
     uncoveredLevels.sort((a, b) => a.dist - b.dist);
     
-    console.log(`📊 Monitor: ${openOrders.length} GRVT, ${uncoveredLevels.length} uncovered, price $${currentPrice.toFixed(2)}`);
+    log.info(`📊 Monitor: ${openOrders.length} GRVT, ${uncoveredLevels.length} uncovered, price $${currentPrice.toFixed(2)}`);
     
     if (uncoveredLevels.length > 0) {
       // Closest uncovered = natural gap
       const gap = uncoveredLevels[0]!;
-      console.log(`🕳️ Gap: $${gap.level.price} (dist=$${gap.dist.toFixed(2)})`);
+      log.info(`🕳️ Gap: $${gap.level.price} (dist=$${gap.dist.toFixed(2)})`);
       await db.updateGridLevel(gap.level.id, { is_filled: true, order_id: '' });
     }
     
@@ -2258,7 +2261,7 @@ export class GridBotInstance {
             if (this.processedFills.size > 200) {
               [...this.processedFills].slice(0, 100).forEach(e => this.processedFills.delete(e));
             }
-            console.log(`✅ Fill confirmed: ${uc.level.side} @ $${uc.level.price}`);
+            log.info(`✅ Fill confirmed: ${uc.level.side} @ $${uc.level.price}`);
             filledLevels.push(uc.level);
           }
           continue;
@@ -2268,22 +2271,22 @@ export class GridBotInstance {
         const correctSide: 'buy' | 'sell' = uc.price < currentPrice ? 'buy' : 'sell';
         // Fixed qty: same for ALL levels (calculated from midpoint price)
         const newQty = this.getFixedQty();
-        console.log(`⚠️ Re-placing: ${correctSide} ${newQty} ETH @ $${uc.level.price}`);
+        log.info(`⚠️ Re-placing: ${correctSide} ${newQty} ETH @ $${uc.level.price}`);
         try {
           await db.updateGridLevel(uc.level.id, { order_id: '0x00', is_filled: false, side: correctSide, quantity: newQty });
           uc.level.side = correctSide;
           uc.level.quantity = newQty;
           await this.placeGridOrder(uc.level);
-          console.log(`✅ Placed: ${correctSide} @ $${uc.level.price}`);
+          log.info(`✅ Placed: ${correctSide} @ $${uc.level.price}`);
         } catch (e) {
-          console.log(`❌ Failed: $${uc.level.price}: ${e instanceof Error ? e.message : e}`);
+          log.info(`❌ Failed: $${uc.level.price}: ${e instanceof Error ? e.message : e}`);
         }
       }
     }
     
     // 5.5 DUPLICATE KILLER: if >93 orders, cancel extras
     if (openOrders.length > 93) {
-      console.log(`🔴 ${openOrders.length} orders — killing duplicates`);
+      log.info(`🔴 ${openOrders.length} orders — killing duplicates`);
       const pc = new Map<string, any[]>();
       for (const order of openOrders) {
         const leg = (order as any).legs?.[0];
@@ -2297,7 +2300,7 @@ export class GridBotInstance {
           for (let i = 1; i < ords.length; i++) {
             try {
               await this.grvt.cancelOrder(ords[i].order_id, this.bot.pair);
-              console.log(`🗑️ Killed dupe @ $${price}`);
+              log.info(`🗑️ Killed dupe @ $${price}`);
             } catch (e) { /* ignore */ }
           }
         }
@@ -2322,13 +2325,13 @@ export class GridBotInstance {
       
       const counterLevel = gridLevelsAll.find((l: any) => l.level_index === counterLevelIndex);
       if (!counterLevel) {
-        console.log(`⚠️ No counter level found for index ${counterLevelIndex}, skipping`);
+        log.info(`⚠️ No counter level found for index ${counterLevelIndex}, skipping`);
         continue;
       }
       
       // ⚠️ CHECK: Si el nivel destino YA tiene orden activa, NO colocar otra (evita duplicados)
       if (counterLevel.order_id && counterLevel.order_id !== '0x00' && counterLevel.order_id !== '0x0000000000000000000000000000000000000000000000000000000000000000' && !counterLevel.is_filled) {
-        console.log(`⚠️ Counter level ${counterLevelIndex} @ $${counterLevel.price} already has order ${counterLevel.order_id}, skipping duplicate`);
+        log.info(`⚠️ Counter level ${counterLevelIndex} @ $${counterLevel.price} already has order ${counterLevel.order_id}, skipping duplicate`);
         // Solo marcar el filled level como filled
         await db.updateGridLevel(level.id, { is_filled: true });
         continue;
@@ -2337,7 +2340,7 @@ export class GridBotInstance {
       // Fixed qty: same for ALL levels (calculated from midpoint price)
       const finalQty = this.getFixedQty();
       
-      console.log(`🔄 Round-trip: ${level.side} filled @ $${level.price} → placing ${counterSide} ${finalQty} ETH @ $${counterLevel.price} (level ${counterLevelIndex})`);
+      log.info(`🔄 Round-trip: ${level.side} filled @ $${level.price} → placing ${counterSide} ${finalQty} ETH @ $${counterLevel.price} (level ${counterLevelIndex})`);
       
       try {
         await this.placeGridOrder({ ...counterLevel, side: counterSide, quantity: finalQty });
@@ -2352,7 +2355,7 @@ export class GridBotInstance {
         });
       } catch (err: any) {
         if (err.message?.includes('7201') || err.message?.includes('2090')) {
-          console.log(`⚠️ Skipping level ${counterLevelIndex}: ${err.message}`);
+          log.info(`⚠️ Skipping level ${counterLevelIndex}: ${err.message}`);
           await db.updateGridLevel(counterLevel.id, { pending_replace: true });
         }
       }
@@ -2374,7 +2377,7 @@ export class GridBotInstance {
     // ⚠️ NUEVO: Deduplicación - verificar si ya procesamos este fill
     const fillKey = `${orderId}_${order.grid_level_id || 'unknown'}`;
     if (this.processedFills.has(fillKey)) {
-      console.log(`🔄 Fill ${orderId} ya procesado, skipeando...`);
+      log.info(`🔄 Fill ${orderId} ya procesado, skipeando...`);
       return;
     }
     
@@ -2403,10 +2406,10 @@ export class GridBotInstance {
         });
         
         totalFees = realFills.reduce((sum, fill) => sum + parseFloat(fill.fee), 0);
-        console.log(`💰 [DEBUG] Fills encontrados para orden ${orderId}: ${realFills.length}, fees total: ${totalFees}`);
+        log.info(`💰 [DEBUG] Fills encontrados para orden ${orderId}: ${realFills.length}, fees total: ${totalFees}`);
         
       } catch (fillErr) {
-        console.log(`⚠️ Error obteniendo fills de GRVT: ${fillErr}, usando fee=0`);
+        log.info(`⚠️ Error obteniendo fills de GRVT: ${fillErr}, usando fee=0`);
       }
 
       // Marcar grid level como completado
@@ -2417,7 +2420,7 @@ export class GridBotInstance {
       // Actualizar status en database
       try { await db.updateOrderStatus(orderId, 'filled'); } catch(e) { /* ignore if not found */ }
 
-      console.log(`✅ Orden filled: ${order.side} ${order.quantity} @ $${order.price} (fee: ${totalFees})`);
+      log.info(`✅ Orden filled: ${order.side} ${order.quantity} @ $${order.price} (fee: ${totalFees})`);
 
       // Registrar trades REALES con fees
       if (realFills.length > 0) {
@@ -2433,9 +2436,9 @@ export class GridBotInstance {
               fee: parseFloat(fill.fee), // ⚠️ FIX: Fee real de GRVT
               fee_currency: fill.fee_currency || 'USDT'
             });
-            console.log(`💾 Trade registrado: ${fill.is_buyer ? 'buy' : 'sell'} ${fill.size} @ ${fill.price} [fee: ${fill.fee}]`);
+            log.info(`💾 Trade registrado: ${fill.is_buyer ? 'buy' : 'sell'} ${fill.size} @ ${fill.price} [fee: ${fill.fee}]`);
           } catch (tradeErr) {
-            console.log(`⚠️ Error guardando trade individual: ${tradeErr}`);
+            log.info(`⚠️ Error guardando trade individual: ${tradeErr}`);
           }
         }
       }
@@ -2445,7 +2448,7 @@ export class GridBotInstance {
       await this.placeCounterOrderWithRetry(order);
 
     } catch (error) {
-      console.error(`❌ Error manejando orden completada ${orderId}:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error manejando orden completada ${orderId}:`);
     }
   }
 
@@ -2459,7 +2462,7 @@ export class GridBotInstance {
         
         // ⚠️ NUEVO: Manejo específico para error 7201 (price protection band)
         if (msg.includes('7201')) {
-          console.log(`⏸️ Error 7201 (price protection band) - NO reintentar, marcar como pendiente`);
+          log.info(`⏸️ Error 7201 (price protection band) - NO reintentar, marcar como pendiente`);
           if (order.grid_level_id) {
             await db.markLevelPendingReplace(order.grid_level_id);
           }
@@ -2471,12 +2474,12 @@ export class GridBotInstance {
         if (msg.includes('post_only') || msg.includes('POST_ONLY') || msg.includes('would cross')) {
           if (attempt < retries) {
             const delay = attempt * 1000; // 1s, 2s, 3s
-            console.log(`⏳ Post-only rejected (would be taker), retry ${attempt}/${retries} en ${delay}ms...`);
+            log.info(`⏳ Post-only rejected (would be taker), retry ${attempt}/${retries} en ${delay}ms...`);
             await new Promise(r => setTimeout(r, delay));
             continue;
           }
           // After all retries, mark as pending so monitor picks it up later
-          console.log(`⏸️ Post-only rejected after ${retries} retries, marcando pendiente`);
+          log.info(`⏸️ Post-only rejected after ${retries} retries, marcando pendiente`);
           if (order.grid_level_id) {
             await db.markLevelPendingReplace(order.grid_level_id);
           }
@@ -2486,26 +2489,26 @@ export class GridBotInstance {
         // Manejo específico para "Max open orders exceeded" (429/2090)
         if (msg.includes('429') && msg.includes('2090')) {
           if (attempt < retries) {
-            console.log(`⚠️ Max open orders exceeded (${msg}), verificando espacio...`);
+            log.info(`⚠️ Max open orders exceeded (${msg}), verificando espacio...`);
             
             try {
               // Verificar cuántas órdenes abiertas tenemos
               const openOrders = await this.grvt.getOpenOrders();
               const orderCount = openOrders.length;
               
-              console.log(`📊 Órdenes abiertas: ${orderCount}/100`);
+              log.info(`📊 Órdenes abiertas: ${orderCount}/100`);
               
               if (orderCount >= 100) {
-                console.log(`❌ Sin espacio para nuevas órdenes (${orderCount}/100)`);
+                log.info(`❌ Sin espacio para nuevas órdenes (${orderCount}/100)`);
                 throw new Error(`Max orders limit reached: ${orderCount}/100`);
               }
               
               // Esperar más tiempo para max orders (10s)
               const delay = 10000;
-              console.log(`⏳ Esperando ${delay}ms antes de reintentar (${attempt}/${retries})...`);
+              log.info(`⏳ Esperando ${delay}ms antes de reintentar (${attempt}/${retries})...`);
               await new Promise(r => setTimeout(r, delay));
             } catch (verifyError) {
-              console.error(`❌ Error verificando órdenes abiertas:`, verifyError);
+              log.error({ err: (verifyError as Error).message }, 'Error verificando ordenes abiertas');
               throw error; // Lanzar error original si no podemos verificar
             }
           } else {
@@ -2514,7 +2517,7 @@ export class GridBotInstance {
         } else if (msg.includes('429') && attempt < retries) {
           // Rate limit genérico
           const delay = attempt * 2000; // 2s, 4s, 6s
-          console.log(`⏳ Rate limited, retry ${attempt}/${retries} en ${delay}ms...`);
+          log.info(`⏳ Rate limited, retry ${attempt}/${retries} en ${delay}ms...`);
           await new Promise(r => setTimeout(r, delay));
         } else {
           throw error;
@@ -2527,12 +2530,12 @@ export class GridBotInstance {
    * Colocar orden inversa para round-trip (LÓGICA MEJORADA)
    */
   private async placeCounterOrder(completedOrder: OrderRecord): Promise<void> {
-    console.log(`🔄 [DEBUG] Bot ${this.bot.id}: ROUND-TRIP para orden ${completedOrder.order_id} (${completedOrder.side} @ $${completedOrder.price})`);
+    log.info(`🔄 [DEBUG] Bot ${this.bot.id}: ROUND-TRIP para orden ${completedOrder.order_id} (${completedOrder.side} @ $${completedOrder.price})`);
 
     // Encontrar nivel actual
     const currentLevel = this.gridLevels.find(l => l.id === completedOrder.grid_level_id);
     if (!currentLevel) {
-      console.log(`❌ [DEBUG] Bot ${this.bot.id}: No se encontró nivel actual para orden ${completedOrder.order_id}`);
+      log.info(`❌ [DEBUG] Bot ${this.bot.id}: No se encontró nivel actual para orden ${completedOrder.order_id}`);
       return;
     }
 
@@ -2549,14 +2552,14 @@ export class GridBotInstance {
     
     const nextLevel = this.gridLevels.find(l => l.level_index === counterLevelIndex);
     if (!nextLevel) {
-      console.log(`⚠️ No counter level at index ${counterLevelIndex}, skipping`);
+      log.info(`⚠️ No counter level at index ${counterLevelIndex}, skipping`);
       return;
     }
 
     // Fixed qty: same for ALL levels (calculated from midpoint price)
     const qty = this.getFixedQty();
     
-    console.log(`🔄 Round-trip: ${completedOrder.side} filled @ $${currentLevel.price} → placing ${counterSide} ${qty} ETH @ $${nextLevel.price} (level ${counterLevelIndex})`);
+    log.info(`🔄 Round-trip: ${completedOrder.side} filled @ $${currentLevel.price} → placing ${counterSide} ${qty} ETH @ $${nextLevel.price} (level ${counterLevelIndex})`);
 
     try {
       await this.placeGridOrder({ ...nextLevel, side: counterSide, quantity: qty });
@@ -2585,14 +2588,14 @@ export class GridBotInstance {
           fee_currency: 'USDT',
           round_trip_profit: rtProfit
         });
-        console.log(`💰 Round-trip profit: $${rtProfit.toFixed(4)} (spread $${spread.toFixed(2)} × ${qty} ETH)`);
+        log.info(`💰 Round-trip profit: $${rtProfit.toFixed(4)} (spread $${spread.toFixed(2)} × ${qty} ETH)`);
       } catch (rtErr) {
-        console.log(`⚠️ Error recording round-trip profit: ${rtErr}`);
+        log.info(`⚠️ Error recording round-trip profit: ${rtErr}`);
       }
       
-      console.log(`✅ Round-trip placed: ${counterSide} @ $${nextLevel.price}`);
+      log.info(`✅ Round-trip placed: ${counterSide} @ $${nextLevel.price}`);
     } catch (error) {
-      console.error(`❌ Round-trip error @ $${nextLevel.price}:`, error instanceof Error ? error.message : error);
+      log.error({ err: error instanceof Error ? error.message : String(error) }, `Round-trip error @ $${nextLevel.price}`);
     }
   }
 
@@ -2612,7 +2615,7 @@ export class GridBotInstance {
       const ticker = await this.grvt.getTicker(this.bot.pair);
       const currentPrice = parseFloat(ticker.last_price);
 
-      console.log(`🔍 Revisando ${pendingLevels.length} niveles pendientes (precio actual: $${currentPrice})`);
+      log.info(`🔍 Revisando ${pendingLevels.length} niveles pendientes (precio actual: $${currentPrice})`);
 
       for (const level of pendingLevels) {
         // Verificar si el precio actual está dentro del ~10% del nivel
@@ -2620,7 +2623,7 @@ export class GridBotInstance {
         const withinRange = priceDistance <= 0.50; // 50% tolerance - increased for grid orders
 
         if (withinRange) {
-          console.log(`🎯 Nivel ${level.level_index} ($${level.price}) dentro del rango — intentando colocar`);
+          log.info(`🎯 Nivel ${level.level_index} ($${level.price}) dentro del rango — intentando colocar`);
           
           try {
             // Intentar colocar la orden
@@ -2629,7 +2632,7 @@ export class GridBotInstance {
             // Si exitoso, limpiar pending_replace
             await db.clearLevelPendingReplace(level.id);
             
-            console.log(`✅ Nivel ${level.level_index} colocado exitosamente y removido de pending`);
+            log.info(`✅ Nivel ${level.level_index} colocado exitosamente y removido de pending`);
             
             // Throttle entre órdenes pendientes
             await new Promise(r => setTimeout(r, 300));
@@ -2638,10 +2641,10 @@ export class GridBotInstance {
             if (error instanceof Error && error.message.includes('7201')) {
               // Aún fuera del price band, mantener como pendiente
             } else if (error instanceof Error && error.message.includes('2090')) {
-              console.log(`⚠️ Max orders reached, stopping pending replacements`);
+              log.info(`⚠️ Max orders reached, stopping pending replacements`);
               return; // STOP - don't try more
             } else {
-              console.error(`❌ Error colocando nivel pendiente ${level.level_index}:`, error instanceof Error ? error.message : error);
+              log.error({ err: error instanceof Error ? error.message : String(error) }, `Error colocando nivel pendiente ${level.level_index}`);
             }
           }
         }
@@ -2649,7 +2652,7 @@ export class GridBotInstance {
       }
       
     } catch (error) {
-      console.error(`❌ Error verificando niveles pendientes:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error verificando niveles pendientes:`);
     }
   }
 
@@ -2677,14 +2680,14 @@ export class GridBotInstance {
       this.pnlUpdateCounter++;
       if (this.pnlUpdateCounter % 12 === 1) {
         try {
-          console.log(`📊 [DEBUG] Calculando grid profit real desde GRVT fills...`);
+          log.info(`📊 [DEBUG] Calculando grid profit real desde GRVT fills...`);
           const realGridProfit = await this.calculateRealGridProfit();
-          console.log(`📊 [DEBUG] Grid profit real calculado: ${realGridProfit}`);
+          log.info(`📊 [DEBUG] Grid profit real calculado: ${realGridProfit}`);
           if (realGridProfit !== null) {
             this.bot.grid_profit_usdt = realGridProfit;
           }
         } catch (gpErr) {
-          console.log(`⚠️ [DEBUG] Error calculando grid profit real: ${gpErr}`);
+          log.info(`⚠️ [DEBUG] Error calculando grid profit real: ${gpErr}`);
         }
       }
 
@@ -2699,7 +2702,7 @@ export class GridBotInstance {
       });
 
     } catch (error) {
-      console.error(`❌ Error actualizando PnL bot ${this.bot.id}:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error actualizando PnL bot ${this.bot.id}:`);
     }
   }
 
@@ -2763,12 +2766,12 @@ export class GridBotInstance {
       }
 
       const netProfit = grossProfit - totalFees;
-      console.log(`📊 [DEBUG] Bot ${this.bot.id} fills: ${fills.length}, Buys: ${totalBuys}, Sells: ${totalSells}, Fees: ${totalFees.toFixed(4)}`);
-      console.log(`📊 [DEBUG] Bot ${this.bot.id} grid pairs: ${pairs}, Gross: $${grossProfit.toFixed(2)}, Net: $${netProfit.toFixed(2)}`);
+      log.info(`📊 [DEBUG] Bot ${this.bot.id} fills: ${fills.length}, Buys: ${totalBuys}, Sells: ${totalSells}, Fees: ${totalFees.toFixed(4)}`);
+      log.info(`📊 [DEBUG] Bot ${this.bot.id} grid pairs: ${pairs}, Gross: $${grossProfit.toFixed(2)}, Net: $${netProfit.toFixed(2)}`);
 
       return netProfit;
     } catch (error) {
-      console.error(`❌ Error calculating real grid profit for bot ${this.bot.id}:`, error);
+      log.error({ err: (error as Error).message }, `❌ Error calculating real grid profit for bot ${this.bot.id}:`);
       return null;
     }
   }
@@ -2780,7 +2783,7 @@ export class GridBotInstance {
     const maxLossThreshold = this.bot.investment_usdt * -0.20; // -20%
     
     if (this.bot.total_pnl_usdt < maxLossThreshold) {
-      console.log(`🚨 SAFEGUARD: Bot ${this.bot.id} alcanzó pérdida máxima: $${this.bot.total_pnl_usdt}`);
+      log.info(`🚨 SAFEGUARD: Bot ${this.bot.id} alcanzó pérdida máxima: $${this.bot.total_pnl_usdt}`);
       throw new Error(`SAFEGUARD: Pérdida máxima alcanzada (-20% del capital)`);
     }
   }
@@ -2791,7 +2794,7 @@ export class GridBotInstance {
   async getRealGridProfitForBot(botId: number): Promise<number | null> {
     const bot = await db.getBot(botId);
     if (!bot) {
-      console.warn(`⚠️ Bot ${botId} no encontrado para calcular grid profit`);
+      log.warn(`⚠️ Bot ${botId} no encontrado para calcular grid profit`);
       return null;
     }
     
@@ -2815,7 +2818,7 @@ export class GridBotInstance {
     const cancelledCount = await this.grvt.cancelAllOrders(this.bot.pair);
     this.activeOrders.clear();
     
-    console.log(`❌ ${cancelledCount} órdenes canceladas para bot ${this.bot.id}`);
+    log.info(`❌ ${cancelledCount} órdenes canceladas para bot ${this.bot.id}`);
   }
 
   /**
@@ -2826,7 +2829,7 @@ export class GridBotInstance {
     // This fixes the issue where repeated restarts reset the midnight
     // timer and no snapshot ever gets created.
     setTimeout(() => {
-      this.createDailySnapshots().catch(console.error);
+      this.createDailySnapshots().catch(err => log.error({ err: (err as Error).message }, 'async task failed'));
     }, 10_000); // 10s after boot (let auth + first monitor pass complete)
 
     // Schedule next at midnight UTC, then every 24h
@@ -2836,12 +2839,12 @@ export class GridBotInstance {
     tomorrow.setUTCHours(0, 0, 0, 0);
     const msUntilMidnight = tomorrow.getTime() - now.getTime();
 
-    console.log(`📸 Daily snapshots: boot snapshot in 10s, then midnight UTC (${Math.round(msUntilMidnight / 1000 / 3600)}h)`);
+    log.info(`📸 Daily snapshots: boot snapshot in 10s, then midnight UTC (${Math.round(msUntilMidnight / 1000 / 3600)}h)`);
 
     setTimeout(() => {
-      this.createDailySnapshots().catch(console.error);
+      this.createDailySnapshots().catch(err => log.error({ err: (err as Error).message }, 'async task failed'));
       (this as any).dailySnapshotInterval = setInterval(() => {
-        this.createDailySnapshots().catch(console.error);
+        this.createDailySnapshots().catch(err => log.error({ err: (err as Error).message }, 'async task failed'));
       }, 24 * 60 * 60 * 1000);
     }, msUntilMidnight);
   }
@@ -2852,7 +2855,7 @@ export class GridBotInstance {
   private async createDailySnapshots(): Promise<void> {
     try {
       const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-      console.log(`📸 Creando daily snapshots para ${today}...`);
+      log.info(`📸 Creando daily snapshots para ${today}...`);
       
       // Obtener precio actual de ETH
       let ethPrice: number | null = null;
@@ -2862,7 +2865,7 @@ export class GridBotInstance {
           ethPrice = parseFloat(tickers[0].last_price);
         }
       } catch (e) {
-        console.warn('⚠️ No se pudo obtener precio de ETH para snapshot');
+        log.warn('⚠️ No se pudo obtener precio de ETH para snapshot');
       }
       
       // Crear snapshot para el bot actual
@@ -2873,7 +2876,7 @@ export class GridBotInstance {
           // Verificar si ya existe snapshot para hoy
           const exists = await db.hasSnapshotForDate(botId, today as string);
           if (exists) {
-            console.log(`📸 Snapshot ya existe para bot ${botId} fecha ${today}`);
+            log.info(`📸 Snapshot ya existe para bot ${botId} fecha ${today}`);
             return;
           }
           
@@ -2904,17 +2907,17 @@ export class GridBotInstance {
             eth_price: ethPrice
           });
           
-          console.log(`📸 Snapshot creado para bot ${botId}: equity=$${equity}, grid_profit=$${gridProfitNet}, round_trips=${roundTrips}`);
+          log.info(`📸 Snapshot creado para bot ${botId}: equity=$${equity}, grid_profit=$${gridProfitNet}, round_trips=${roundTrips}`);
           
         } catch (error) {
-          console.error(`❌ Error creando snapshot para bot ${botId}:`, error);
+          log.error({ err: (error as Error).message }, `❌ Error creando snapshot para bot ${botId}:`);
         }
       }
       
-      console.log(`✅ Daily snapshots completados para ${today}`);
+      log.info(`✅ Daily snapshots completados para ${today}`);
       
     } catch (error) {
-      console.error('❌ Error en createDailySnapshots:', error);
+      log.error({ err: (error as Error).message }, '❌ Error en createDailySnapshots:');
     }
   }
 

@@ -15,6 +15,7 @@
 // going. The bot is the source of truth — the notifier is a side-car.
 
 import dotenv from 'dotenv';
+import { createServer, type Server } from 'node:http';
 import { NotifierDb, type BotRow } from './db.js';
 import { TelegramClient } from './telegram.js';
 import { StateStore } from './state.js';
@@ -61,6 +62,9 @@ class Notifier {
   private readonly state: StateStore;
   private timer: NodeJS.Timeout | null = null;
   private stopping = false;
+  private lastTickAt: number = 0;
+  private tickCount: number = 0;
+  private healthServer: Server | null = null;
 
   constructor(cfg: NotifierConfig) {
     this.cfg = cfg;
@@ -90,6 +94,31 @@ class Notifier {
       log.info({ lastRoundtripId: latestId, equityHwm: equity }, 'bootstrap state');
     }
 
+    // C.10: health endpoint for Docker HEALTHCHECK. Minimal HTTP
+    // server on NOTIFIER_HEALTH_PORT (default 3849). Returns 200 if
+    // the last tick ran within 3× the poll interval, 503 otherwise.
+    const healthPort = parseInt(process.env.NOTIFIER_HEALTH_PORT ?? '3849', 10);
+    this.healthServer = createServer((_req, res) => {
+      const maxAge = this.cfg.pollMs * 3;
+      const elapsed = Date.now() - this.lastTickAt;
+      // Before the first tick fires, lastTickAt is 0. Treat as healthy
+      // during startup (within maxAge of boot).
+      const healthy = this.lastTickAt === 0 || elapsed < maxAge;
+      const body = JSON.stringify({
+        status: healthy ? 'ok' : 'stale',
+        lastTickAt: this.lastTickAt || null,
+        tickCount: this.tickCount,
+        elapsedMs: this.lastTickAt ? elapsed : null,
+        pollMs: this.cfg.pollMs,
+        uptime: Math.floor(process.uptime()),
+      });
+      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(body);
+    });
+    this.healthServer.listen(healthPort, () => {
+      log.info({ port: healthPort }, 'health endpoint listening');
+    });
+
     log.info('sending hello message to telegram');
     await this.telegram.send('🟢 *GRVT Grid Notifier online*');
     log.info('hello sent — scheduling first tick');
@@ -116,6 +145,8 @@ class Notifier {
 
   private async tick(): Promise<void> {
     try {
+      this.lastTickAt = Date.now();
+      this.tickCount++;
       const bots = await this.db.getAllBots();
       await this.checkRoundtrips();
       await this.checkStatusTransitions(bots);
@@ -217,6 +248,10 @@ class Notifier {
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.timer) clearTimeout(this.timer);
+    if (this.healthServer) {
+      this.healthServer.close();
+      this.healthServer = null;
+    }
     await this.telegram.send('⚪ *GRVT Grid Notifier offline*');
     await this.db.close();
     log.info('notifier stopped');

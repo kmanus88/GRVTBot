@@ -648,9 +648,11 @@ export function createV2Router(deps: V2RouterDeps): Router {
     const id = parseInt(String(req.params.id ?? ''), 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid bot id' });
     await requireBotOwnership(db, id, req.userId!);
+    const limit = Math.min(parseInt(String(req.query.limit ?? '365'), 10) || 365, 1000);
+    const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
     const snapshots = await dbAll(db, `
-      SELECT * FROM daily_snapshots WHERE bot_id = ? ORDER BY date DESC LIMIT 365
-    `, [id]);
+      SELECT * FROM daily_snapshots WHERE bot_id = ? ORDER BY date DESC LIMIT ? OFFSET ?
+    `, [id, limit, offset]);
     res.json({ snapshots });
     return;
   }));
@@ -664,13 +666,15 @@ export function createV2Router(deps: V2RouterDeps): Router {
     // Multi-tenant: filter by user_id (added in the migration). Legacy
     // rows with NULL user_id are treated as user 1's.
     const userId = req.userId!;
+    const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000);
+    const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
     const roundtrips = await dbAll(db, `
       SELECT id, buy_fill_id, sell_fill_id, buy_price, sell_price, size, profit, created_at
       FROM paired_roundtrips
       WHERE COALESCE(user_id, 1) = ?
       ORDER BY id DESC
-      LIMIT 1000
-    `, [userId]);
+      LIMIT ? OFFSET ?
+    `, [userId, limit, offset]);
     const total = await dbGet<{ c: number; sum: number }>(db, `
       SELECT COUNT(*) as c, COALESCE(SUM(profit), 0) as sum
       FROM paired_roundtrips
@@ -695,6 +699,7 @@ export function createV2Router(deps: V2RouterDeps): Router {
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid bot id' });
     await requireBotOwnership(db, id, req.userId!);
     const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000);
+    const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
 
     const fills = await dbAll<{
       id: number;
@@ -710,8 +715,8 @@ export function createV2Router(deps: V2RouterDeps): Router {
       FROM fills_archive
       WHERE bot_id = ?
       ORDER BY event_time DESC
-      LIMIT ?
-    `, [id, limit]);
+      LIMIT ? OFFSET ?
+    `, [id, limit, offset]);
 
     res.json({ fills });
     return;
@@ -1152,19 +1157,20 @@ export function createV2Router(deps: V2RouterDeps): Router {
     await requireBotOwnership(db, id, req.userId!);
     const status = String(req.query.status ?? 'all');
     const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000);
+    const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
 
     try {
       const where = status === 'all' ? '' : 'AND status = ?';
       const params: unknown[] = [id];
       if (status !== 'all') params.push(status);
-      params.push(limit);
+      params.push(limit, offset);
       const orders = await dbAll(db, `
         SELECT id, order_id, side, type, quantity, price, status,
                grid_level_id, created_at, updated_at
         FROM orders
         WHERE bot_id = ? ${where}
         ORDER BY id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
       `, params);
       res.json({ orders });
       return;
@@ -1183,6 +1189,7 @@ export function createV2Router(deps: V2RouterDeps): Router {
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid bot id' });
     await requireBotOwnership(db, id, req.userId!);
     const limit = Math.min(parseInt(String(req.query.limit ?? '500'), 10) || 500, 5000);
+    const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
 
     const funding = await dbAll(db, `
       SELECT id, instrument, funding_rate, payment_usdt, position_size,
@@ -1190,8 +1197,8 @@ export function createV2Router(deps: V2RouterDeps): Router {
       FROM funding_history
       WHERE bot_id = ?
       ORDER BY funding_time DESC
-      LIMIT ?
-    `, [id, limit]);
+      LIMIT ? OFFSET ?
+    `, [id, limit, offset]);
 
     const totals = await dbGet<{ count: number; total: number }>(db, `
       SELECT COUNT(*) as count, COALESCE(SUM(payment_usdt), 0) as total
