@@ -2796,23 +2796,20 @@ export class GridBotInstance {
         avgEntryPrice = parseFloat(position.entry_price);
       }
 
-      // Recalcular grid profit desde paired_roundtrips (source of truth).
-      // paired_roundtrips captures every fill in real-time as the engine
-      // processes it. fills_archive is back-populated by the poller and
-      // may be incomplete (only covers fills since the poller was added).
-      // The old calculateRealGridProfit() used fills_archive, which
-      // produced a $34 number when the real profit was $85 — because it
-      // only saw 256 of 628+ actual fills. Now we use the authoritative
-      // SUM from paired_roundtrips directly.
+      // Recalcular grid profit desde fills_archive (FIFO spread matching).
+      // After the audit fix, fills_archive is the authoritative source:
+      // paired_roundtrips is regenerated from it and both should agree.
+      // The engine recalculates every 12th tick (~60s) to stay accurate
+      // as new fills arrive from the GRVT poller.
       this.pnlUpdateCounter++;
       if (this.pnlUpdateCounter % 12 === 1) {
         try {
-          const rtSum = await db.getRoundtripProfitSum(this.bot.id);
-          if (rtSum !== null) {
-            this.bot.grid_profit_usdt = rtSum;
+          const realGridProfit = await this.calculateRealGridProfit();
+          if (realGridProfit !== null) {
+            this.bot.grid_profit_usdt = realGridProfit;
           }
         } catch (gpErr) {
-          log.info(`⚠️ Error fetching roundtrip profit sum: ${gpErr}`);
+          log.info(`⚠️ Error calculating grid profit: ${gpErr}`);
         }
       }
 
