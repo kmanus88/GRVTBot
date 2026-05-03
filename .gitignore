@@ -18,6 +18,13 @@ data/*.db
 data/*.db-*
 *.bak
 
+# Local-only deploy artifacts — must never be committed
+.vps-pw
+.deploy-*.ps1
+.deploy-*.sh
+*.deploy-pw
+secrets/
+
 # TypeScript build artifacts that sometimes get pulled in alongside source
 **/src/**/*.js
 **/src/**/*.js.map
