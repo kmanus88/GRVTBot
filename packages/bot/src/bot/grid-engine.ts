@@ -2007,9 +2007,18 @@ export class GridEngine extends EventEmitter {
       }
       if (!Array.isArray(allFills) || allFills.length === 0) continue;
 
+      // GRVT silently ignores the `instrument` body field on
+      // /trading/fill_history and returns ALL fills for the sub-account.
+      // Without this filter the first bot to poll claims every fill in
+      // the response (regardless of pair) and the next bot's INSERT OR
+      // IGNORE on fill_id silently discards everything. Filter
+      // client-side instead. Discovered 2026-05-03 — bot 44 (ETH) had
+      // ingested 291 SOL fills from bot 48 across 8 days.
+      const ownFills = allFills.filter((f) => f.instrument === instrument);
+
       let added = 0;
       let feeSum = 0;
-      for (const f of allFills) {
+      for (const f of ownFills) {
         const eventTime = String(f.event_time ?? '');
         if (!eventTime) continue;
         const fee = parseFloat(f.fee ?? '0');
@@ -3417,6 +3426,16 @@ export class GridBotInstance {
 
       if (!fills || fills.length === 0) return 0;
 
+      // Spread-pair window scaled to this bot's grid spacing. The old
+      // hardcoded `(3, 20)` was tuned for ETH (spacing ~$6) and silently
+      // rejected every legit pair on smaller-priced instruments — the
+      // SOL bot had 0 paired roundtrips despite hundreds of fills
+      // because $0.25 spreads never fell into (3, 20). Use 0.5x to 3x
+      // spacing so adjacent-grid pairs match on any instrument.
+      const spacing = (this.bot.upper_price - this.bot.lower_price) / this.bot.num_grids;
+      const spreadMin = spacing * 0.5;
+      const spreadMax = spacing * 3;
+
       let totalFees = 0;
       let grossProfit = 0;
       let pairs = 0;
@@ -3436,7 +3455,7 @@ export class GridBotInstance {
           let bestSpread = Infinity;
           pendingBuys.forEach((b, i) => {
             const spread = f.price - b.price;
-            if (spread > 3 && spread < 20 && spread < bestSpread) {
+            if (spread > spreadMin && spread < spreadMax && spread < bestSpread) {
               bestIdx = i;
               bestSpread = spread;
             }
