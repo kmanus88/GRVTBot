@@ -416,3 +416,108 @@ describe('Auth middleware', () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ── SECURITY: pre-auth Prometheus endpoint (C-4) ────────────────────
+// /api/v2/metrics deliberately sits BEFORE the JWT auth middleware so
+// Prometheus scrapers don't need a user JWT. The security audit found
+// this exposed per-bot equity/PnL/position labels to anyone who could
+// reach the port. The fix gates it on either METRICS_TOKEN or
+// localhost-origin requests; everything else must 401.
+describe('GET /api/v2/metrics — C-4 gate', () => {
+  const PREV_TOKEN = process.env.METRICS_TOKEN;
+  beforeAll(() => { delete process.env.METRICS_TOKEN; });
+  afterAll(() => {
+    if (PREV_TOKEN === undefined) delete process.env.METRICS_TOKEN;
+    else process.env.METRICS_TOKEN = PREV_TOKEN;
+  });
+
+  it('rejects external requests when METRICS_TOKEN is unset and request is not from localhost', async () => {
+    delete process.env.METRICS_TOKEN;
+    const { app } = createTestApp();
+    // supertest's req.ip resolves to ::ffff:127.0.0.1 (mapped IPv4) by
+    // default. Spoofing X-Forwarded-For doesn't help — the gate reads
+    // req.socket.remoteAddress / req.ip directly. To exercise the
+    // non-localhost path we set req.ip via trust proxy.
+    app.set('trust proxy', true);
+    const res = await request(app)
+      .get('/api/v2/metrics')
+      .set('X-Forwarded-For', '203.0.113.7');
+    expect(res.status).toBe(401);
+    expect(res.body.hint).toContain('METRICS_TOKEN');
+  });
+
+  it('allows localhost requests when no token is configured', async () => {
+    delete process.env.METRICS_TOKEN;
+    const { app } = createTestApp();
+    const res = await request(app).get('/api/v2/metrics');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/plain');
+    expect(res.text).toContain('grvt_bot_count');
+  });
+
+  it('requires a valid token when METRICS_TOKEN is configured', async () => {
+    process.env.METRICS_TOKEN = 'super-secret-token-32-chars-min!!';
+    const { app } = createTestApp();
+    const reject = await request(app).get('/api/v2/metrics');
+    expect(reject.status).toBe(401);
+
+    const wrongTok = await request(app)
+      .get('/api/v2/metrics')
+      .set('Authorization', 'Bearer wrong-token');
+    expect(wrongTok.status).toBe(401);
+
+    const ok = await request(app)
+      .get('/api/v2/metrics')
+      .set('Authorization', 'Bearer super-secret-token-32-chars-min!!');
+    expect(ok.status).toBe(200);
+    expect(ok.text).toContain('grvt_bot_count');
+  });
+
+  it('accepts token via ?token= query param too', async () => {
+    process.env.METRICS_TOKEN = 'super-secret-token-32-chars-min!!';
+    const { app } = createTestApp();
+    const ok = await request(app).get(
+      '/api/v2/metrics?token=super-secret-token-32-chars-min!!'
+    );
+    expect(ok.status).toBe(200);
+  });
+});
+
+// ── SECURITY: password reset must not trust Host header (C-3) ────────
+// Pre-fix, if APP_BASE_URL was unset, the handler built the reset URL
+// from req.protocol + req.get('host'), letting an attacker host-spoof
+// the email link to a phishing domain. The fix refuses to derive from
+// Host and falls back to the enumeration-safe 200 response.
+describe('POST /api/v2/auth/forgot-password — C-3 Host header', () => {
+  const PREV = process.env.APP_BASE_URL;
+  beforeAll(() => { delete process.env.APP_BASE_URL; });
+  afterAll(() => {
+    if (PREV === undefined) delete process.env.APP_BASE_URL;
+    else process.env.APP_BASE_URL = PREV;
+  });
+
+  it('returns 200 silently when APP_BASE_URL is unset and never uses Host header', async () => {
+    delete process.env.APP_BASE_URL;
+    const { app, gridBotDb } = createTestApp();
+    // Make the user lookup return a "real" user so the handler takes
+    // the configured-but-cannot-build-URL branch (not the unknown-
+    // email branch).
+    (gridBotDb as any).getUserByEmail = vi.fn().mockResolvedValue({
+      id: 1, email: 'victim@example.com', password_hash: 'x',
+    });
+    (gridBotDb as any).invalidateOpenPasswordResetTokensForUser = vi.fn().mockResolvedValue(undefined);
+    (gridBotDb as any).insertPasswordResetToken = vi.fn().mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/v2/auth/forgot-password')
+      .set('Host', 'evil.attacker.example.com')
+      .send({ email: 'victim@example.com' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    // Most important assertion: we never wrote a reset token, because
+    // we can't construct a usable URL. (Pre-fix this would have INSERTed
+    // a token AND emailed it pointing at evil.attacker.example.com.)
+    expect((gridBotDb as any).insertPasswordResetToken).not.toHaveBeenCalled();
+  });
+});

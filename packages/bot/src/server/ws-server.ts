@@ -3,15 +3,22 @@
 // Mounts on the existing Express HTTP server at the path /ws and handles
 // the upgrade dance. Each client:
 //
-//   1. Connects to ws://host:3848/ws?api_key=<key>
-//   2. Server validates api_key against process.env.DASHBOARD_API_KEY,
-//      closes with 4401 if invalid (custom code in the 4xxx range that
-//      WS allows for app-level errors).
+//   1. Connects to ws://host:3848/ws?token=<jwt>  (multi-tenant)
+//      or    ws://host:3848/ws?api_key=<key>      (legacy operator/admin)
+//   2. Server validates the credential and closes with 4401 if invalid.
+//      JWT clients have their userId stamped on the connection so we can
+//      enforce bot-channel ownership at subscribe time. api_key clients
+//      are treated as the operator (no per-channel filtering — they own
+//      the box).
 //   3. Server sends a `hello` frame with server version + a session id.
 //   4. Client sends `subscribe` frames listing channels it wants
 //      (e.g. `bot:42`, `prices`, `notifications`).
-//   5. Server forwards bus events for those channels via WsBus.subscribe.
-//   6. On disconnect, all subscriptions are torn down.
+//   5. For channels that match `bot:<id>`, the server verifies ownership
+//      against the DB before wiring up the bus subscription. Foreign-bot
+//      subscriptions are silently dropped (the ack lists only the
+//      accepted channels).
+//   6. Server forwards bus events for accepted channels via WsBus.subscribe.
+//   7. On disconnect, all subscriptions are torn down.
 //
 // Heartbeat: server pings every 30s, closes connections that don't pong
 // within 5s. Browsers handle this transparently, but it lets us detect
@@ -36,8 +43,26 @@ const CLOSE_BAD_REQUEST = 4400;
 interface ClientState {
   id: string;
   ws: WebSocket;
+  // null for legacy operator (api_key) connections — those bypass per-bot
+  // ownership checks. A number means this is a JWT-authed user and bot
+  // channels must belong to them.
+  userId: number | null;
   unsubscribers: Map<string, () => void>;  // channel -> teardown
   isAlive: boolean;
+}
+
+export interface WsServerOptions {
+  apiKey: string;
+  // Verifies a JWT and returns the userId, or null if invalid/expired.
+  // Optional — if omitted, only api_key auth works. In production the
+  // bootstrap wires this to auth/jwt.ts:verifyToken.
+  verifyToken?: (token: string) => { userId: number } | null;
+  // Resolves whether a JWT-authed user is allowed to subscribe to a
+  // channel. Called for every `subscribe` frame. Optional — when
+  // omitted, every channel is allowed (useful in unit tests). The
+  // bootstrap wires this to a DB-backed lookup that gates `bot:<id>`
+  // channels by user ownership.
+  authorizeChannel?: (userId: number, channel: string) => Promise<boolean>;
 }
 
 export class GrvtWebSocketServer {
@@ -45,12 +70,18 @@ export class GrvtWebSocketServer {
   private clients = new Map<WebSocket, ClientState>();
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private readonly apiKey: string;
+  private readonly verifyToken?: (token: string) => { userId: number } | null;
+  private readonly authorizeChannel?: (userId: number, channel: string) => Promise<boolean>;
 
-  constructor(httpServer: HttpServer, apiKey: string) {
-    if (!apiKey || apiKey.length < 16) {
+  constructor(httpServer: HttpServer, optsOrApiKey: WsServerOptions | string) {
+    const opts: WsServerOptions =
+      typeof optsOrApiKey === 'string' ? { apiKey: optsOrApiKey } : optsOrApiKey;
+    if (!opts.apiKey || opts.apiKey.length < 16) {
       throw new Error('DASHBOARD_API_KEY must be at least 16 chars');
     }
-    this.apiKey = apiKey;
+    this.apiKey = opts.apiKey;
+    this.verifyToken = opts.verifyToken;
+    this.authorizeChannel = opts.authorizeChannel;
 
     this.wss = new WebSocketServer({
       server: httpServer,
@@ -68,14 +99,33 @@ export class GrvtWebSocketServer {
   }
 
   private onConnection(ws: WebSocket, req: IncomingMessage): void {
-    // Auth via query string ?api_key=...
-    // (Browsers can't set custom headers on the WS handshake, so query string is
-    //  the standard pattern. The api_key never appears in URL bars / logs since
-    //  the dashboard runs on localhost or behind TLS.)
+    // Auth via query string. Browsers can't set custom headers on the
+    // WS handshake, so the credential rides in the URL.
+    //   ?token=<jwt>     → multi-tenant user, ownership-checked
+    //   ?api_key=<key>   → legacy operator/admin, full access
+    // The credential never appears in URL bars / logs since the dashboard
+    // runs on localhost or behind TLS.
     const url = new URL(req.url ?? '/ws', `http://${req.headers.host}`);
+    const providedToken = url.searchParams.get('token');
     const providedKey = url.searchParams.get('api_key');
 
-    if (providedKey !== this.apiKey) {
+    let userId: number | null = null;
+    if (providedToken && this.verifyToken) {
+      const payload = this.verifyToken(providedToken);
+      if (!payload) {
+        log.warn(
+          { ip: req.socket.remoteAddress },
+          'rejected WS connection: invalid/expired JWT'
+        );
+        ws.close(CLOSE_UNAUTHORIZED, 'unauthorized');
+        return;
+      }
+      userId = payload.userId;
+    } else if (providedKey && providedKey === this.apiKey) {
+      // Legacy operator connection — keeps existing scripts / admin
+      // tools working. userId stays null and bypasses ownership checks.
+      userId = null;
+    } else {
       log.warn({ ip: req.socket.remoteAddress }, 'rejected unauthenticated WS connection');
       ws.close(CLOSE_UNAUTHORIZED, 'unauthorized');
       return;
@@ -85,12 +135,13 @@ export class GrvtWebSocketServer {
     const state: ClientState = {
       id,
       ws,
+      userId,
       unsubscribers: new Map(),
       isAlive: true
     };
     this.clients.set(ws, state);
 
-    log.info({ clientId: id, total: this.clients.size }, 'client connected');
+    log.info({ clientId: id, userId, total: this.clients.size }, 'client connected');
 
     ws.on('message', (raw) => this.onMessage(state, raw));
     ws.on('pong', () => { state.isAlive = true; });
@@ -124,22 +175,56 @@ export class GrvtWebSocketServer {
       case 'subscribe': {
         // { type: 'subscribe', channels: ['bot:42', 'prices'] }
         const channels = Array.isArray(msg.channels) ? msg.channels : [];
-        for (const channel of channels) {
-          if (typeof channel !== 'string') continue;
-          if (state.unsubscribers.has(channel)) continue;  // already subscribed
-
-          const teardown = wsBus.subscribe(channel, (busMsg) => {
-            this.send(state.ws, busMsg);
+        // Authorize every channel *before* wiring up bus subscriptions, so
+        // a foreign bot never gets a teardown registered. Returning early
+        // here is fine — we never await inside a `case` block, but a
+        // fire-and-forget IIFE lets us keep the synchronous switch shape.
+        void (async () => {
+          const accepted: string[] = [];
+          const rejected: string[] = [];
+          for (const channel of channels) {
+            if (typeof channel !== 'string') continue;
+            if (state.unsubscribers.has(channel)) {
+              accepted.push(channel);
+              continue;
+            }
+            // Per-user gating: JWT clients (userId !== null) must own
+            // `bot:<id>` channels. Operator (api_key, userId === null)
+            // bypasses. Non-bot channels (`prices`, `notifications`) are
+            // unrestricted broadcast feeds.
+            if (state.userId !== null && this.authorizeChannel) {
+              const ok = await this.authorizeChannel(state.userId, channel).catch((err) => {
+                log.error({ err, channel, userId: state.userId }, 'authorizeChannel threw');
+                return false;
+              });
+              if (!ok) {
+                rejected.push(channel);
+                continue;
+              }
+            }
+            const teardown = wsBus.subscribe(channel, (busMsg) => {
+              this.send(state.ws, busMsg);
+            });
+            state.unsubscribers.set(channel, teardown);
+            accepted.push(channel);
+          }
+          if (rejected.length > 0) {
+            log.warn(
+              { clientId: state.id, userId: state.userId, rejected },
+              'rejected channel subscriptions (not owned by user)'
+            );
+          }
+          log.debug({ clientId: state.id, accepted, rejected }, 'subscribed');
+          this.send(state.ws, {
+            type: 'subscribed',
+            channel: 'system',
+            data: {
+              channels: Array.from(state.unsubscribers.keys()),
+              ...(rejected.length > 0 ? { rejected } : {}),
+            },
+            timestamp: Date.now()
           });
-          state.unsubscribers.set(channel, teardown);
-        }
-        log.debug({ clientId: state.id, channels }, 'subscribed');
-        this.send(state.ws, {
-          type: 'subscribed',
-          channel: 'system',
-          data: { channels: Array.from(state.unsubscribers.keys()) },
-          timestamp: Date.now()
-        });
+        })();
         break;
       }
 

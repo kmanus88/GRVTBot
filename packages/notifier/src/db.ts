@@ -30,10 +30,18 @@ export interface BotRow {
   alert_drawdown_pct?: number | null;
   alert_fill_batch?: number | null;
   alert_liq_proximity_pct?: number | null;
+  // SECURITY: every alert is owner-tagged with this user_id so the bot
+  // API can filter alert history per JWT-authed user. NULL on legacy
+  // pre-multi-tenant rows; the bot router treats NULL as user 1.
+  user_id?: number | null;
 }
 
 export interface RoundtripRow {
   id: number;
+  bot_id: number;
+  // user_id of the bot that produced this roundtrip — joined in so
+  // per-user fill batching can be done without an extra lookup.
+  user_id: number | null;
   buy_price: number;
   sell_price: number;
   size: number;
@@ -86,7 +94,8 @@ export class NotifierDb {
       `SELECT id, pair, status, direction, leverage, investment_usdt,
               total_pnl_usdt, grid_profit_usdt, trend_pnl_usdt,
               avg_entry_price, liquidation_price,
-              alert_drawdown_pct, alert_fill_batch, alert_liq_proximity_pct
+              alert_drawdown_pct, alert_fill_batch, alert_liq_proximity_pct,
+              user_id
        FROM grid_bots`
     );
   }
@@ -109,13 +118,17 @@ export class NotifierDb {
 
   /**
    * Roundtrips with id > sinceId. Used to detect new fills/profits.
+   * Joins grid_bots so the caller can batch + attribute by owner without
+   * a second query — important for the multi-tenant fill notifier path.
    */
   getRoundtripsSince(sinceId: number, limit: number = 100): Promise<RoundtripRow[]> {
     return this.all<RoundtripRow>(
-      `SELECT id, buy_price, sell_price, size, profit, created_at
-       FROM paired_roundtrips
-       WHERE id > ?
-       ORDER BY id ASC
+      `SELECT pr.id, pr.bot_id, b.user_id, pr.buy_price, pr.sell_price,
+              pr.size, pr.profit, pr.created_at
+       FROM paired_roundtrips pr
+       LEFT JOIN grid_bots b ON b.id = pr.bot_id
+       WHERE pr.id > ?
+       ORDER BY pr.id ASC
        LIMIT ?`,
       [sinceId, limit]
     );

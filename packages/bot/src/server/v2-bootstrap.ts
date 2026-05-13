@@ -19,6 +19,7 @@ import { WsDispatcher } from './ws-dispatcher.js';
 import { createV2Router } from './v2-router.js';
 import { childLogger } from './logger.js';
 import type { GridBotDB } from '../database/db.js';
+import { verifyToken } from '../auth/jwt.js';
 
 const log = childLogger('v2-bootstrap');
 
@@ -105,8 +106,39 @@ export function mountV2(opts: MountV2Options): V2Handles {
   opts.setRouter(router);
   log.info('built v2 REST router and registered via placeholder');
 
-  // Mount the WebSocket server on the same HTTP server
-  const wsServer = new GrvtWebSocketServer(opts.httpServer, opts.apiKey);
+  // Mount the WebSocket server on the same HTTP server.
+  // JWT-authed clients get per-bot ownership checks at subscribe time;
+  // legacy api_key clients (operator/scripts) bypass the check.
+  const db = opts.db;
+  const wsServer = new GrvtWebSocketServer(opts.httpServer, {
+    apiKey: opts.apiKey,
+    verifyToken,
+    authorizeChannel: async (userId, channel) => {
+      // Only `bot:<id>` channels are user-scoped. Other channels
+      // (`prices`, `notifications`, `system`) are broadcast feeds.
+      const m = /^bot:(\d+)$/.exec(channel);
+      if (!m) return true;
+      const botId = parseInt(m[1]!, 10);
+      const row = await new Promise<{ user_id: number | null } | undefined>((resolve) => {
+        db.get(
+          `SELECT user_id FROM grid_bots WHERE id = ?`,
+          [botId],
+          (err: Error | null, row: { user_id: number | null } | undefined) => {
+            if (err) {
+              log.warn({ err, botId, userId }, 'ws authorizeChannel: db error');
+              resolve(undefined);
+              return;
+            }
+            resolve(row);
+          }
+        );
+      });
+      if (!row) return false;
+      // Legacy NULL user_id rows are owned by user 1 (mirrors router policy).
+      const ownerId = row.user_id ?? 1;
+      return ownerId === userId;
+    },
+  });
 
   // Wire the engine events + DB polling to the bus
   const dispatcher = new WsDispatcher({

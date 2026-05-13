@@ -377,13 +377,26 @@ export function createV2Router(deps: V2RouterDeps): Router {
       (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
       req.ip ||
       null;
+    // SECURITY: never derive the reset URL from the request's Host header.
+    // An attacker can spoof Host and trick the email link into pointing at
+    // their server, leaking the raw token when the victim clicks. Require
+    // APP_BASE_URL to be explicitly configured by the operator.
+    const baseUrl = process.env.APP_BASE_URL?.trim().replace(/\/$/, '');
+    if (!baseUrl || !/^https?:\/\//.test(baseUrl)) {
+      log.error(
+        { userId: user.id, hasAppBaseUrl: !!process.env.APP_BASE_URL },
+        'password reset requested but APP_BASE_URL is not configured (or invalid). Refusing to derive from Host header.'
+      );
+      // Stay enumeration-safe — same 200 the unknown-email path returns.
+      res.json({ ok: true });
+      return;
+    }
     await gridBotDb.insertPasswordResetToken({
       user_id: user.id,
       token_hash: tokenHash,
       expires_at: expiresAt,
       ip_address: ipAddress,
     });
-    const baseUrl = (process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
     const resetUrl = `${baseUrl}/dashboard/reset-password?token=${rawToken}`;
     try {
       await sendPasswordResetEmail({
@@ -429,11 +442,41 @@ export function createV2Router(deps: V2RouterDeps): Router {
   }));
 
   // ── GET /api/v2/metrics ────────────────────────────────────────────
-  // G.1: Prometheus-compatible text metrics. BEFORE auth middleware so
-  // external scrapers (Grafana Agent, Prometheus server) can poll
-  // without needing a JWT. Exposes: bot count by status, equity,
-  // PnL, fill rate, memory, uptime.
-  router.get('/metrics', asyncHandler(async (_req, res) => {
+  // G.1: Prometheus-compatible text metrics. Sits BEFORE the JWT auth
+  // middleware so scrapers don't need a user token, but is NOT public:
+  // it exposes per-bot equity/PnL/position with bot_id+pair labels, which
+  // would leak every user's portfolio if scrapeable from the internet.
+  //
+  // Gate (in order):
+  //   1. If METRICS_TOKEN is set → require it via `Authorization: Bearer
+  //      <token>` or `?token=<token>`.
+  //   2. Else → only allow localhost (127.0.0.1 / ::1). External
+  //      requests get 401 with a hint.
+  router.get('/metrics', (req: Request, res: Response, next: NextFunction) => {
+    const required = process.env.METRICS_TOKEN?.trim();
+    if (required && required.length >= 16) {
+      const header = req.header('authorization') || '';
+      const bearer = /^Bearer\s+(.+)$/i.exec(header)?.[1];
+      const provided = bearer ?? (typeof req.query.token === 'string' ? req.query.token : undefined);
+      if (provided && provided === required) return next();
+      log.warn({ ip: req.ip, path: req.path }, 'rejected /metrics request: missing/invalid token');
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const remote = req.ip || req.socket.remoteAddress || '';
+    const isLocalhost =
+      remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    if (isLocalhost) return next();
+    log.warn(
+      { ip: remote, path: req.path },
+      'rejected /metrics request from non-localhost (set METRICS_TOKEN to allow remote scrapers)'
+    );
+    res.status(401).json({
+      error: 'unauthorized',
+      hint: 'set METRICS_TOKEN (min 16 chars) on the bot and pass it as Authorization: Bearer <token>, or scrape from localhost',
+    });
+    return;
+  }, asyncHandler(async (_req, res) => {
     const bots = await dbAll<{
       id: number; status: string; pair: string;
       investment_usdt: number; total_pnl_usdt: number;
@@ -2282,7 +2325,14 @@ export function createV2Router(deps: V2RouterDeps): Router {
   // F.6: Read the notifier's alert history file. The notifier writes
   // this as a JSON array in its state directory; we read it from the
   // shared data path. Returns newest-first, with optional ?limit.
+  //
+  // SECURITY: filtered by userId. Each alert is tagged with the owning
+  // user when the notifier writes it; entries that pre-date the
+  // multi-tenant security fix (and therefore lack a userId) are treated
+  // as owned by user 1 (the operator), matching the v2-router COALESCE
+  // policy elsewhere.
   router.get('/alerts', asyncHandler(async (req, res) => {
+    const userId = req.userId!;
     const limit = Math.min(parseInt(String(req.query.limit ?? '100'), 10) || 100, 500);
     try {
       const fs = await import('node:fs');
@@ -2293,8 +2343,9 @@ export function createV2Router(deps: V2RouterDeps): Router {
         return;
       }
       const raw = fs.readFileSync(historyPath, 'utf8');
-      const all = JSON.parse(raw) as unknown[];
-      const recent = all.slice(-limit).reverse(); // newest first
+      const all = JSON.parse(raw) as Array<{ userId?: number } & Record<string, unknown>>;
+      const mine = all.filter((a) => (a.userId ?? 1) === userId);
+      const recent = mine.slice(-limit).reverse(); // newest first
       res.json({ alerts: recent });
     } catch (err) {
       log.warn({ err: (err as Error).message }, 'alert history read failed');

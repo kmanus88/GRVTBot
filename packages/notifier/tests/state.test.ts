@@ -24,26 +24,29 @@ describe('StateStore (D.7)', () => {
   it('returns defaults when no cursor.json exists yet', () => {
     const s = new StateStore(dir);
     const state = s.get();
-    expect(state.lastRoundtripId).toBe(0);
-    expect(state.equityHwm).toBe(0);
+    expect(state.lastRoundtripIdByUser).toEqual({});
+    expect(state.equityHwmByUser).toEqual({});
     expect(state.lastBotStatus).toEqual({});
     expect(state.lastSummaryDate).toBeNull();
-    expect(state.lastErrorHash).toBeNull();
+    expect(state.lastErrorHashByUser).toEqual({});
   });
 
   it('persists updates atomically (tmp + rename) and round-trips them', () => {
     const s = new StateStore(dir);
-    s.update({ lastRoundtripId: 42, equityHwm: 1234.56 });
+    s.update({
+      lastRoundtripIdByUser: { '1': 42 },
+      equityHwmByUser: { '1': 1234.56 },
+    });
 
     // Read with a second instance to confirm the JSON on disk parses.
     const s2 = new StateStore(dir);
-    expect(s2.get().lastRoundtripId).toBe(42);
-    expect(s2.get().equityHwm).toBe(1234.56);
+    expect(s2.get().lastRoundtripIdByUser).toEqual({ '1': 42 });
+    expect(s2.get().equityHwmByUser).toEqual({ '1': 1234.56 });
   });
 
   it('does not leave the .tmp scratch file behind after a successful write', () => {
     const s = new StateStore(dir);
-    s.update({ lastRoundtripId: 7 });
+    s.update({ lastRoundtripIdByUser: { '1': 7 } });
     const files = fs.readdirSync(dir);
     expect(files).toContain('cursor.json');
     expect(files.find((f) => f.endsWith('.tmp'))).toBeUndefined();
@@ -51,16 +54,39 @@ describe('StateStore (D.7)', () => {
 
   it('merges partial updates onto existing state without clobbering other fields', () => {
     const s = new StateStore(dir);
-    s.update({ lastRoundtripId: 5, equityHwm: 1000 });
-    s.update({ lastRoundtripId: 10 }); // only id should change
-    expect(s.get().lastRoundtripId).toBe(10);
-    expect(s.get().equityHwm).toBe(1000);
+    s.update({
+      lastRoundtripIdByUser: { '1': 5 },
+      equityHwmByUser: { '1': 1000 },
+    });
+    s.update({ lastRoundtripIdByUser: { '1': 10 } }); // only id should change
+    expect(s.get().lastRoundtripIdByUser).toEqual({ '1': 10 });
+    expect(s.get().equityHwmByUser).toEqual({ '1': 1000 });
   });
 
   it('falls back to defaults on corrupt JSON instead of throwing', () => {
     fs.writeFileSync(path.join(dir, 'cursor.json'), '{not valid json');
     const s = new StateStore(dir);
-    expect(s.get().lastRoundtripId).toBe(0);
+    expect(s.get().lastRoundtripIdByUser).toEqual({});
+  });
+
+  it('migrates legacy single-tenant fields (lastRoundtripId / equityHwm / lastErrorHash) onto user "1"', () => {
+    // Simulate a state file written before the multi-tenant security fix.
+    fs.writeFileSync(
+      path.join(dir, 'cursor.json'),
+      JSON.stringify({
+        lastRoundtripId: 99,
+        equityHwm: 5000,
+        lastErrorHash: 'dd:5000:1',
+        lastBotStatus: { '48': 'running' },
+        lastSummaryDate: '2026-05-11',
+      })
+    );
+    const s = new StateStore(dir);
+    expect(s.get().lastRoundtripIdByUser).toEqual({ '1': 99 });
+    expect(s.get().equityHwmByUser).toEqual({ '1': 5000 });
+    expect(s.get().lastErrorHashByUser).toEqual({ '1': 'dd:5000:1' });
+    expect(s.get().lastBotStatus).toEqual({ '48': 'running' });
+    expect(s.get().lastSummaryDate).toBe('2026-05-11');
   });
 
   it('appendAlert + getAlertHistory round-trip a single entry', () => {

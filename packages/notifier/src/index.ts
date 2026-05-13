@@ -106,15 +106,27 @@ class Notifier {
    * F.3: Send to all configured sinks (Telegram + webhook).
    * The webhook always gets the structured event; Telegram gets the
    * formatted text.
+   *
+   * SECURITY: every alert is tagged with `userId` so /api/v2/alerts on
+   * the bot can filter per JWT-authed user. Callers MUST pass the
+   * owning user — there is no "system-wide" alert that gets shown to
+   * everyone (that would leak one user's drawdown to another).
    */
   private async notify(
     text: string,
-    event: { type: string; botId?: number; pair?: string; data?: Record<string, unknown> }
+    event: {
+      type: string;
+      userId: number;
+      botId?: number;
+      pair?: string;
+      data?: Record<string, unknown>;
+    }
   ): Promise<void> {
     // F.6: log alert to history file before sending
     this.state.appendAlert({
       ts: Date.now(),
       type: event.type,
+      userId: event.userId,
       botId: event.botId,
       pair: event.pair,
       message: text,
@@ -125,6 +137,15 @@ class Notifier {
       this.telegram.send(text),
       this.webhook.send({ ...event, message: text }),
     ]);
+  }
+
+  /**
+   * Helper — every per-bot alert needs to be attributed to a user.
+   * Legacy rows with NULL user_id are owned by user 1 (the operator),
+   * matching the v2-router COALESCE policy.
+   */
+  private ownerOf(bot: BotRow): number {
+    return bot.user_id ?? 1;
   }
 
   async start(): Promise<void> {
@@ -138,14 +159,35 @@ class Notifier {
       'notifier starting'
     );
 
-    // Bootstrap: if first run, set the cursor to "now" so we don't spam
-    // every historical roundtrip on startup.
-    if (this.state.get().lastRoundtripId === 0) {
+    // Bootstrap: on first run (no per-user cursor yet), set cursors so
+    // we don't spam every historical roundtrip on startup. Done per
+    // user — each owner gets their own starting point.
+    const cursors = this.state.get().lastRoundtripIdByUser;
+    if (Object.keys(cursors).length === 0) {
       const recent = await this.db.getRoundtripsSince(0, 100_000);
-      const latestId = recent[recent.length - 1]?.id ?? 0;
-      const equity = await this.db.getCurrentEquity();
-      this.state.update({ lastRoundtripId: latestId, equityHwm: equity });
-      log.info({ lastRoundtripId: latestId, equityHwm: equity }, 'bootstrap state');
+      const bots = await this.db.getAllBots();
+      const newCursors: Record<string, number> = {};
+      // Initialize a cursor for every known user (operator + any signed-up users)
+      for (const b of bots) {
+        const uid = String(this.ownerOf(b));
+        newCursors[uid] = 0;
+      }
+      // Advance each user's cursor past their latest historical roundtrip
+      for (const rt of recent) {
+        const uid = String(rt.user_id ?? 1);
+        const prev = newCursors[uid] ?? 0;
+        if (rt.id > prev) newCursors[uid] = rt.id;
+      }
+      const newHwm: Record<string, number> = {};
+      for (const b of bots) {
+        const uid = String(this.ownerOf(b));
+        newHwm[uid] = (newHwm[uid] ?? 0) + (b.investment_usdt + b.total_pnl_usdt);
+      }
+      this.state.update({
+        lastRoundtripIdByUser: newCursors,
+        equityHwmByUser: newHwm,
+      });
+      log.info({ cursors: newCursors, hwm: newHwm }, 'bootstrap state (per-user)');
     }
 
     // C.10: health endpoint for Docker HEALTHCHECK. Minimal HTTP
@@ -220,27 +262,49 @@ class Notifier {
   }
 
   // ── Roundtrip / fill detection ─────────────────────────────────────
+  // SECURITY: batches and cursors are per-user. The previous global
+  // cursor + global batch leaked another user's fill counts into the
+  // operator's Telegram and held cursor advancement hostage to whoever
+  // had the fewest fills.
   private async checkRoundtrips(_bots: BotRow[]): Promise<void> {
-    const since = this.state.get().lastRoundtripId;
-    const newRts = await this.db.getRoundtripsSince(since, 200);
-    if (newRts.length === 0) return;
+    const cursors = { ...this.state.get().lastRoundtripIdByUser };
+    // Read from min cursor across users so a slow-tracking user doesn't
+    // get permanently skipped. Per-row user attribution gates the rest.
+    const minCursor = Object.keys(cursors).length === 0
+      ? 0
+      : Math.min(...Object.values(cursors));
+    const candidates = await this.db.getRoundtripsSince(minCursor, 500);
+    if (candidates.length === 0) return;
 
-    // F.1: per-bot fillBatch threshold (uses global default when not set)
-    const threshold = this.cfg.fillBatch;
-    if (newRts.length < threshold) {
-      log.debug({ count: newRts.length }, 'below batch threshold, holding');
-      return;
+    // Group by owning user, dropping anything already past that user's cursor.
+    const byUser = new Map<string, typeof candidates>();
+    for (const rt of candidates) {
+      const uid = String(rt.user_id ?? 1);
+      const userCursor = cursors[uid] ?? 0;
+      if (rt.id <= userCursor) continue;
+      const arr = byUser.get(uid) ?? [];
+      arr.push(rt);
+      byUser.set(uid, arr);
     }
 
-    const text = fillsTemplate(newRts);
-    await this.notify(text, {
-      type: 'fills',
-      data: { count: newRts.length, totalProfit: newRts.reduce((s, r) => s + r.profit, 0) },
-    });
-
-    const newCursor = newRts[newRts.length - 1]!.id;
-    this.state.update({ lastRoundtripId: newCursor });
-    log.info({ count: newRts.length, cursor: newCursor }, 'sent fill batch');
+    const threshold = this.cfg.fillBatch;
+    let mutated = false;
+    for (const [uid, rts] of byUser) {
+      if (rts.length < threshold) {
+        log.debug({ uid, count: rts.length }, 'below batch threshold, holding');
+        continue;
+      }
+      const text = fillsTemplate(rts);
+      await this.notify(text, {
+        type: 'fills',
+        userId: Number(uid),
+        data: { count: rts.length, totalProfit: rts.reduce((s, r) => s + r.profit, 0) },
+      });
+      cursors[uid] = rts[rts.length - 1]!.id;
+      mutated = true;
+      log.info({ uid, count: rts.length, cursor: cursors[uid] }, 'sent fill batch');
+    }
+    if (mutated) this.state.update({ lastRoundtripIdByUser: cursors });
   }
 
   // ── Status transitions ─────────────────────────────────────────────
@@ -253,6 +317,7 @@ class Notifier {
         const text = statusChangeTemplate(bot, previous, bot.status);
         await this.notify(text, {
           type: 'status_change',
+          userId: this.ownerOf(bot),
           botId: bot.id,
           pair: bot.pair,
           data: { from: previous, to: bot.status },
@@ -270,38 +335,73 @@ class Notifier {
     if (changed) this.state.update({ lastBotStatus: lastStatus });
   }
 
-  // ── Drawdown ───────────────────────────────────────────────────────
+  // ── Drawdown (per-user) ─────────────────────────────────────────────
+  // SECURITY: drawdown is computed PER USER. The previous global HWM
+  // mixed every user's equity together, so a $1M drop on user B would
+  // alert user A with B's number visible in the Telegram batch via the
+  // shared notifier and via the shared alert-history.json file.
   private async checkDrawdown(bots: BotRow[]): Promise<void> {
-    const equity = await this.db.getCurrentEquity();
-    const hwm = this.state.get().equityHwm;
+    if (bots.length === 0) return;
 
-    if (equity > hwm) {
-      this.state.update({ equityHwm: equity });
-      return;
+    // Aggregate equity per owning user.
+    const equityByUser = new Map<string, number>();
+    const botsByUser = new Map<string, BotRow[]>();
+    for (const b of bots) {
+      const uid = String(this.ownerOf(b));
+      equityByUser.set(uid, (equityByUser.get(uid) ?? 0) + (b.investment_usdt + b.total_pnl_usdt));
+      const arr = botsByUser.get(uid) ?? [];
+      arr.push(b);
+      botsByUser.set(uid, arr);
     }
 
-    // F.1: use per-bot drawdown threshold if only one bot, else global
-    const threshold = bots.length === 1 && bots[0]!.alert_drawdown_pct != null
-      ? bots[0]!.alert_drawdown_pct!
-      : this.cfg.drawdownPct;
+    const hwmMap = { ...this.state.get().equityHwmByUser };
+    const errorMap = { ...this.state.get().lastErrorHashByUser };
+    let hwmChanged = false;
+    let errorChanged = false;
 
-    const dropPct = ((hwm - equity) / hwm) * 100;
-    if (dropPct >= threshold) {
-      const bucket = Math.floor(dropPct / threshold);
-      const hash = `dd:${hwm.toFixed(0)}:${bucket}`;
-      if (this.state.get().lastErrorHash === hash) return;
-      const text = drawdownTemplate(equity, hwm, threshold);
-      await this.notify(text, {
-        type: 'drawdown',
-        data: { equity, hwm, dropPct, threshold },
+    for (const [uid, equity] of equityByUser) {
+      const hwm = hwmMap[uid] ?? equity;
+      if (equity > hwm) {
+        hwmMap[uid] = equity;
+        hwmChanged = true;
+        continue;
+      }
+      // F.1: per-bot drawdown override only applies when the user has a
+      // single bot (otherwise multiple thresholds would compete).
+      const userBots = botsByUser.get(uid) ?? [];
+      const threshold = userBots.length === 1 && userBots[0]!.alert_drawdown_pct != null
+        ? userBots[0]!.alert_drawdown_pct!
+        : this.cfg.drawdownPct;
+
+      const dropPct = hwm > 0 ? ((hwm - equity) / hwm) * 100 : 0;
+      if (dropPct >= threshold) {
+        const bucket = Math.floor(dropPct / threshold);
+        const hash = `dd:${hwm.toFixed(0)}:${bucket}`;
+        if (errorMap[uid] === hash) continue;
+        const text = drawdownTemplate(equity, hwm, threshold);
+        await this.notify(text, {
+          type: 'drawdown',
+          userId: Number(uid),
+          data: { equity, hwm, dropPct, threshold },
+        });
+        errorMap[uid] = hash;
+        errorChanged = true;
+        log.warn({ uid, equity, hwm, dropPct }, 'drawdown alert sent');
+      }
+    }
+
+    if (hwmChanged || errorChanged) {
+      this.state.update({
+        ...(hwmChanged ? { equityHwmByUser: hwmMap } : {}),
+        ...(errorChanged ? { lastErrorHashByUser: errorMap } : {}),
       });
-      this.state.update({ lastErrorHash: hash });
-      log.warn({ equity, hwm, dropPct }, 'drawdown alert sent');
     }
   }
 
   // ── F.2: Liquidation proximity ─────────────────────────────────────
   private async checkLiqProximity(bots: BotRow[]): Promise<void> {
+    const errorMap = { ...this.state.get().lastErrorHashByUser };
+    let changed = false;
     for (const bot of bots) {
       if (bot.status !== 'running') continue;
       if (!bot.liquidation_price || bot.liquidation_price <= 0) continue;
@@ -318,22 +418,27 @@ class Notifier {
         : ((bot.liquidation_price - markPrice) / markPrice) * 100;
 
       if (distancePct <= threshold && distancePct > 0) {
-        // Dedup: use bot+bucket hash so we re-alert if it gets worse
+        const owner = this.ownerOf(bot);
+        const uid = String(owner);
+        // Dedup: per-user, bot+bucket so the alert re-fires if it gets worse
         const bucket = Math.floor(distancePct / 5);
         const hash = `liq:${bot.id}:${bucket}`;
-        if (this.state.get().lastErrorHash === hash) continue;
+        if (errorMap[uid] === hash) continue;
 
         const text = liqProximityTemplate(bot, markPrice, bot.liquidation_price, distancePct);
         await this.notify(text, {
           type: 'liq_proximity',
+          userId: owner,
           botId: bot.id,
           pair: bot.pair,
           data: { markPrice, liqPrice: bot.liquidation_price, distancePct },
         });
-        this.state.update({ lastErrorHash: hash });
+        errorMap[uid] = hash;
+        changed = true;
         log.warn({ botId: bot.id, distancePct }, 'liq proximity alert sent');
       }
     }
+    if (changed) this.state.update({ lastErrorHashByUser: errorMap });
   }
 
   // ── Daily summary ──────────────────────────────────────────────────
@@ -351,6 +456,7 @@ class Notifier {
       const yesterday: number | null = snapshot?.equity ?? null;
       await this.notify(dailySummaryTemplate(bot, snapshot, yesterday), {
         type: 'daily_summary',
+        userId: this.ownerOf(bot),
         botId: bot.id,
         pair: bot.pair,
       });
