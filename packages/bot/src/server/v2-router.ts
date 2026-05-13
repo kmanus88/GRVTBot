@@ -12,6 +12,7 @@
 // shared TtlCache so dashboard polls don't hammer GRVT.
 
 import { Router, type Request, type Response, type NextFunction } from 'express';
+import rateLimit from 'express-rate-limit';
 import type Database from 'sqlite3';
 import { createHash, randomBytes } from 'node:crypto';
 import { childLogger } from './logger.js';
@@ -230,6 +231,48 @@ function asyncHandler(fn: AsyncHandler) {
   };
 }
 
+// ─── Rate limiters (H-6) ───────────────────────────────────────────────
+// Protect auth endpoints from credential-stuffing / brute-force / email-
+// bombing. Limits are deliberately generous so a single user fat-fingering
+// their password 3 times doesn't get locked out — the goal is to make
+// automated abuse uneconomical, not to be a CAPTCHA.
+//
+// Test environments disable the limit entirely (NODE_ENV=test or
+// DISABLE_RATE_LIMIT=1) so the integration tests can hammer endpoints
+// without flake. Production behavior is what matters.
+function makeAuthLimiter(maxPerWindow: number, windowMs: number) {
+  return rateLimit({
+    windowMs,
+    limit: maxPerWindow,
+    standardHeaders: 'draft-7', // RateLimit-* headers per RFC draft
+    legacyHeaders: false,
+    // Read env vars per-request, not at construction time — tests need
+    // to toggle the flag dynamically. In production this is a single
+    // boolean check per request, negligible cost.
+    skip: () =>
+      process.env.NODE_ENV === 'test' || process.env.DISABLE_RATE_LIMIT === '1',
+    handler: (req, res) => {
+      log.warn(
+        { ip: req.ip, path: req.path },
+        'rate limit exceeded on auth endpoint'
+      );
+      res.status(429).json({
+        error: 'too_many_requests',
+        message: 'Too many attempts from this IP. Try again in a few minutes.',
+      });
+    },
+  });
+}
+
+// 5 attempts per 15 min — covers normal "I fat-fingered my password 3 times"
+// without locking out, but a 1000-password dictionary attack needs ~50 hours.
+const LOGIN_LIMITER = makeAuthLimiter(5, 15 * 60 * 1000);
+// Signup: 3 per hour. Stops a single IP from spinning up dozens of accounts.
+const SIGNUP_LIMITER = makeAuthLimiter(3, 60 * 60 * 1000);
+// Password reset: 3 per hour. Stops email-bombing a known address. Stricter
+// than login because each call triggers an outbound email + DB write.
+const RESET_LIMITER = makeAuthLimiter(3, 60 * 60 * 1000);
+
 // ─── The router ────────────────────────────────────────────────────────
 export function createV2Router(deps: V2RouterDeps): Router {
   const { db, gridBotDb, grvtClient, engineOps, apiKey } = deps;
@@ -255,7 +298,7 @@ export function createV2Router(deps: V2RouterDeps): Router {
 - You will not hold the operator liable for any losses.`;
 
   // POST /api/v2/auth/signup — public.
-  router.post('/auth/signup', asyncHandler(async (req, res) => {
+  router.post('/auth/signup', SIGNUP_LIMITER, asyncHandler(async (req, res) => {
     const body = (req.body ?? {}) as { email?: unknown; password?: unknown };
     const email = String(body.email ?? '').trim().toLowerCase();
     const password = String(body.password ?? '');
@@ -270,12 +313,24 @@ export function createV2Router(deps: V2RouterDeps): Router {
       return res.status(409).json({ error: 'email already registered' });
     }
     const password_hash = await hashPassword(password);
-    // First user becomes admin automatically.
-    const userCount = await gridBotDb.countUsers();
+    // SECURITY (H-5): admin status is granted ONLY to the email that
+    // matches ADMIN_EMAIL env var. The previous "first user becomes
+    // admin" rule had two failure modes:
+    //   1. Race — two concurrent signups could both see countUsers() === 0
+    //      and both walk away with admin.
+    //   2. Hijack — if signups opened before the operator created their
+    //      own account, an attacker who learned the URL first would be
+    //      promoted to admin.
+    // Requiring an explicit email match closes both. If ADMIN_EMAIL is
+    // unset, no user is auto-promoted; promotion happens manually via
+    // the DB or a future /admin/promote-user endpoint.
+    const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+    const isAdmin =
+      adminEmail !== undefined && adminEmail !== '' && adminEmail === email;
     const userId = await gridBotDb.createUser({
       email,
       password_hash,
-      is_admin: userCount === 0,
+      is_admin: isAdmin,
     });
     const ipAddress =
       (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
@@ -292,18 +347,18 @@ export function createV2Router(deps: V2RouterDeps): Router {
       terms_text: SIGNUP_TOS_TEXT,
       terms_text_hash: createHash('sha256').update(SIGNUP_TOS_TEXT).digest('hex'),
     });
-    log.info({ userId, email, isAdmin: userCount === 0 }, 'user signed up');
+    log.info({ userId, email, isAdmin }, 'user signed up');
     res.json({
       token: signToken(userId),
       userId,
-      isAdmin: userCount === 0,
+      isAdmin,
       hasGrvtCreds: false,
     });
     return;
   }));
 
   // POST /api/v2/auth/login — public.
-  router.post('/auth/login', asyncHandler(async (req, res) => {
+  router.post('/auth/login', LOGIN_LIMITER, asyncHandler(async (req, res) => {
     const body = (req.body ?? {}) as { email?: unknown; password?: unknown };
     const email = String(body.email ?? '').trim().toLowerCase();
     const password = String(body.password ?? '');
@@ -352,7 +407,7 @@ export function createV2Router(deps: V2RouterDeps): Router {
   const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
   const RESET_TOKEN_TTL_MIN = 60;
 
-  router.post('/auth/forgot-password', asyncHandler(async (req, res) => {
+  router.post('/auth/forgot-password', RESET_LIMITER, asyncHandler(async (req, res) => {
     const body = (req.body ?? {}) as { email?: unknown };
     const email = String(body.email ?? '').trim().toLowerCase();
     // Cheap shape check — do not bail with detailed error since that
@@ -415,7 +470,7 @@ export function createV2Router(deps: V2RouterDeps): Router {
     return;
   }));
 
-  router.post('/auth/reset-password', asyncHandler(async (req, res) => {
+  router.post('/auth/reset-password', RESET_LIMITER, asyncHandler(async (req, res) => {
     const body = (req.body ?? {}) as { token?: unknown; new_password?: unknown };
     const token = String(body.token ?? '').trim();
     const newPassword = String(body.new_password ?? '');

@@ -483,6 +483,158 @@ describe('GET /api/v2/metrics — C-4 gate', () => {
   });
 });
 
+// ── SECURITY: ADMIN_EMAIL controls auto-admin (H-5) ──────────────────
+// Previously the "first user becomes admin" rule had a race and an
+// account-hijack vector. New rule: admin is granted only to the email
+// that matches ADMIN_EMAIL.
+describe('POST /api/v2/auth/signup — H-5 ADMIN_EMAIL gate', () => {
+  const PREV = process.env.ADMIN_EMAIL;
+  afterAll(() => {
+    if (PREV === undefined) delete process.env.ADMIN_EMAIL;
+    else process.env.ADMIN_EMAIL = PREV;
+  });
+
+  function makeGridBotDbWithSignup(overrides: Record<string, any> = {}) {
+    return {
+      upsertGrvtCredentials: vi.fn().mockResolvedValue(undefined),
+      getGrvtCredentialsRaw: vi.fn().mockResolvedValue(null),
+      deleteGrvtCredentials: vi.fn().mockResolvedValue(undefined),
+      countActiveBotsForUser: vi.fn().mockResolvedValue(0),
+      insertTermsAcceptance: vi.fn().mockResolvedValue(undefined),
+      touchGrvtCredentialsLastUsed: vi.fn().mockResolvedValue(undefined),
+      getUserByEmail: vi.fn().mockResolvedValue(null),
+      countUsers: vi.fn().mockResolvedValue(0),
+      createUser: vi.fn().mockResolvedValue(7),
+      hasGrvtCredentials: vi.fn().mockResolvedValue(false),
+      ...overrides,
+    };
+  }
+
+  function makeApp(gridBotDb: any) {
+    const db = makeMockDb();
+    const router = createV2Router({
+      db: db as any,
+      gridBotDb,
+      grvtClient: makeMockGrvtClient() as any,
+      engineOps: makeMockEngineOps(),
+      apiKey: API_KEY,
+    });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/v2', router);
+    return { app, gridBotDb };
+  }
+
+  it('does NOT auto-promote any user when ADMIN_EMAIL is unset', async () => {
+    delete process.env.ADMIN_EMAIL;
+    const gridBotDb = makeGridBotDbWithSignup();
+    const { app } = makeApp(gridBotDb);
+
+    const res = await request(app)
+      .post('/api/v2/auth/signup')
+      .send({ email: 'whoever@example.com', password: 'supersecret' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.isAdmin).toBe(false);
+    expect(gridBotDb.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({ is_admin: false })
+    );
+  });
+
+  it('promotes ONLY the email matching ADMIN_EMAIL', async () => {
+    process.env.ADMIN_EMAIL = 'owner@example.com';
+    const gridBotDb = makeGridBotDbWithSignup();
+    const { app } = makeApp(gridBotDb);
+
+    const res = await request(app)
+      .post('/api/v2/auth/signup')
+      .send({ email: 'OWNER@Example.com', password: 'supersecret' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.isAdmin).toBe(true);
+    expect(gridBotDb.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({ is_admin: true, email: 'owner@example.com' })
+    );
+  });
+
+  it('does NOT promote a different email even when no users exist yet (race-safe)', async () => {
+    process.env.ADMIN_EMAIL = 'owner@example.com';
+    const gridBotDb = makeGridBotDbWithSignup({
+      countUsers: vi.fn().mockResolvedValue(0), // empty DB — pre-fix this triggered admin
+    });
+    const { app } = makeApp(gridBotDb);
+
+    const res = await request(app)
+      .post('/api/v2/auth/signup')
+      .send({ email: 'attacker@example.com', password: 'supersecret' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.isAdmin).toBe(false);
+    expect(gridBotDb.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({ is_admin: false })
+    );
+  });
+});
+
+// ── SECURITY: rate limiting on auth endpoints (H-6) ─────────────────
+// Production runs with limiters enabled; tests pass DISABLE_RATE_LIMIT=1
+// in process.env so the integration suite isn't flaky. These tests
+// explicitly opt back IN by toggling the flag during each test.
+describe('Auth endpoints — H-6 rate limiting', () => {
+  const PREV_TEST = process.env.NODE_ENV;
+  const PREV_DISABLE = process.env.DISABLE_RATE_LIMIT;
+
+  beforeAll(() => {
+    // express-rate-limit reads process.env at constructor time (via our
+    // `skip` closure). Tests in this suite need real enforcement, which
+    // means a fresh router built with the flag off. We restore env in
+    // afterAll so other suites stay un-rate-limited.
+    delete process.env.NODE_ENV;
+    delete process.env.DISABLE_RATE_LIMIT;
+  });
+  afterAll(() => {
+    if (PREV_TEST !== undefined) process.env.NODE_ENV = PREV_TEST;
+    if (PREV_DISABLE !== undefined) process.env.DISABLE_RATE_LIMIT = PREV_DISABLE;
+  });
+
+  it('login limiter returns 429 after 5 attempts from the same IP', async () => {
+    // The default mock gridBotDb doesn't implement getUserByEmail, so
+    // wire a minimal one that returns "no user" (→ 401 on every attempt).
+    const db = makeMockDb();
+    const gridBotDb = {
+      upsertGrvtCredentials: vi.fn().mockResolvedValue(undefined),
+      getGrvtCredentialsRaw: vi.fn().mockResolvedValue(null),
+      deleteGrvtCredentials: vi.fn().mockResolvedValue(undefined),
+      countActiveBotsForUser: vi.fn().mockResolvedValue(0),
+      insertTermsAcceptance: vi.fn().mockResolvedValue(undefined),
+      touchGrvtCredentialsLastUsed: vi.fn().mockResolvedValue(undefined),
+      getUserByEmail: vi.fn().mockResolvedValue(null),
+    };
+    const router = createV2Router({
+      db: db as any,
+      gridBotDb: gridBotDb as any,
+      grvtClient: makeMockGrvtClient() as any,
+      engineOps: makeMockEngineOps(),
+      apiKey: API_KEY,
+    });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/v2', router);
+
+    for (let i = 0; i < 5; i++) {
+      const r = await request(app)
+        .post('/api/v2/auth/login')
+        .send({ email: 'a@b.c', password: 'wrong' });
+      expect(r.status).toBe(401);
+    }
+    const blocked = await request(app)
+      .post('/api/v2/auth/login')
+      .send({ email: 'a@b.c', password: 'wrong' });
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error).toBe('too_many_requests');
+  });
+});
+
 // ── SECURITY: password reset must not trust Host header (C-3) ────────
 // Pre-fix, if APP_BASE_URL was unset, the handler built the reset URL
 // from req.protocol + req.get('host'), letting an attacker host-spoof

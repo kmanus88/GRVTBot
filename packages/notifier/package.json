@@ -16,7 +16,7 @@
     "dotenv": "^16.4.7",
     "pino": "^9.5.0",
     "pino-pretty": "^11.3.0",
-    "sqlite3": "^5.1.7",
+    "sqlite3": "^6.0.1",
     "undici": "^7.22.0"
   },
   "devDependencies": {

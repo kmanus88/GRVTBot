@@ -6,6 +6,7 @@ import dns from 'dns';
 dns.setDefaultResultOrder('ipv4first');
 
 import express from 'express';
+import helmet from 'helmet';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'node:fs';
@@ -140,6 +141,31 @@ const basicAuth = (req: express.Request, res: express.Response, next: express.Ne
 };
 
 // Middleware
+//
+// SECURITY (H-7): helmet sets a curated set of response headers that
+// block common browser-level attack vectors:
+//   - X-Content-Type-Options: nosniff      (no MIME sniffing)
+//   - X-Frame-Options: SAMEORIGIN          (no clickjacking via iframe)
+//   - Strict-Transport-Security             (HTTPS-only for 1y, when behind TLS)
+//   - Referrer-Policy: no-referrer          (no token leak via referer header)
+//   - Cross-Origin-* policies               (isolate the dashboard process)
+//
+// Content-Security-Policy is disabled by default because the legacy
+// dashboard at /dashboard/ relies on inline scripts; the v2 dashboard
+// is served as a built Vite bundle and is CSP-friendly, but tightening
+// CSP here would break the legacy UI. Set ENABLE_CSP=1 once the legacy
+// dashboard is retired.
+app.use(
+  helmet({
+    contentSecurityPolicy: process.env.ENABLE_CSP === '1' ? undefined : false,
+    // crossOriginEmbedderPolicy can break embedded third-party charts;
+    // leave it off (the only iframe risk is clickjacking, covered by frameguard).
+    crossOriginEmbedderPolicy: false,
+    // HSTS only makes sense behind TLS — the reverse proxy strips/sets it
+    // anyway, but enabling it here means localhost dev curls don't get
+    // upgraded by accident. Default is fine (1y, no preload).
+  })
+);
 app.use(express.json());
 
 // Debug logging middleware
