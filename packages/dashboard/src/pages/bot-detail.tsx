@@ -257,17 +257,18 @@ export function BotDetailPage() {
   async function handleStart() {
     const ok = await confirm({
       variant: 'warning',
-      title: `Start bot ${botId}?`,
-      description: 'This will place real orders on GRVT.',
+      title: t('botDetail.confirmStart.title', { id: botId }),
+      description: t('botDetail.confirmStart.description'),
       body: (
         <div className="space-y-2">
-          <p>The bot will immediately place limit orders on GRVT using:</p>
+          <p>{t('botDetail.confirmStart.lead')}</p>
           <ul className="list-disc list-inside space-y-0.5 font-mono text-2xs">
             <li>
-              Pair: <span className="text-text-primary">{bot.pair}</span>
+              {t('botDetail.confirmStart.pair')}{' '}
+              <span className="text-text-primary">{bot.pair}</span>
             </li>
             <li>
-              Direction:{' '}
+              {t('botDetail.confirmStart.direction')}{' '}
               <span
                 className={
                   bot.direction === 'long' ? 'text-success' : 'text-danger'
@@ -277,30 +278,30 @@ export function BotDetailPage() {
               </span>
             </li>
             <li>
-              Leverage:{' '}
+              {t('botDetail.confirmStart.leverage')}{' '}
               <span className="text-text-primary">{bot.leverage}x</span>
             </li>
             <li>
-              Investment:{' '}
+              {t('botDetail.confirmStart.investment')}{' '}
               <span className="text-text-primary">
                 {formatUsd(bot.investment_usdt)}
               </span>
             </li>
             <li>
-              Range:{' '}
+              {t('botDetail.confirmStart.range')}{' '}
               <span className="text-text-primary">
                 {formatUsd(bot.lower_price)} — {formatUsd(bot.upper_price)}
               </span>
             </li>
             <li>
-              Grid: <span className="text-text-primary">{bot.num_grids}</span>{' '}
-              levels
+              {t('botDetail.confirmStart.grid')} <span className="text-text-primary">{bot.num_grids}</span>{' '}
+              {t('botDetail.confirmStart.levelsSuffix')}
             </li>
           </ul>
         </div>
       ),
-      confirmLabel: 'Start trading',
-      cancelLabel: 'Cancel',
+      confirmLabel: t('botDetail.confirmStart.confirm'),
+      cancelLabel: t('botDetail.confirmStart.cancel'),
     });
     if (ok) startMutation.mutate();
   }
@@ -309,26 +310,31 @@ export function BotDetailPage() {
     const openOrderCount = gridStateQuery.data?.openOrders.length ?? 0;
     const ok = await confirm({
       variant: 'destructive',
-      title: `Pause bot ${botId}?`,
+      title: t('botDetail.confirmPause.title', { id: botId }),
       description: `${bot.pair} · ${bot.direction.toUpperCase()} · ${bot.leverage}x`,
       body: (
         <div className="space-y-2">
           <p className="font-semibold text-text-primary">
-            This will <Mono>CANCEL {openOrderCount || 'ALL'}</Mono> open orders
-            on GRVT.
+            {t('botDetail.confirmPause.leadOpen')}{' '}
+            <Mono>
+              {openOrderCount
+                ? t('botDetail.confirmPause.leadCancel', { n: openOrderCount })
+                : t('botDetail.confirmPause.leadCancelAll')}
+            </Mono>{' '}
+            {t('botDetail.confirmPause.leadEnd')}
           </p>
           <p>
-            The position ({formatSize(positionSize)} ETH @{' '}
-            <Mono>{formatUsd(avgEntry)}</Mono>) will{' '}
-            <strong className="text-text-primary">not</strong> be closed —
-            only the limit orders are cancelled. You can resume the bot later
-            with <strong className="text-text-primary">Start</strong>, which
-            will rebind to whatever orders or position is left.
+            {t('botDetail.confirmPause.body', {
+              size: formatSize(positionSize),
+              price: formatUsd(avgEntry),
+            })}
           </p>
         </div>
       ),
-      confirmLabel: `Cancel ${openOrderCount || 'all'} orders`,
-      cancelLabel: 'Keep running',
+      confirmLabel: openOrderCount
+        ? t('botDetail.confirmPause.confirmCount', { n: openOrderCount })
+        : t('botDetail.confirmPause.confirmAll'),
+      cancelLabel: t('botDetail.confirmPause.cancel'),
     });
     if (ok) pauseMutation.mutate();
   }
@@ -338,38 +344,42 @@ export function BotDetailPage() {
     const hasPosition = Math.abs(positionSize) > 1e-6;
     const ok = await confirm({
       variant: 'destructive',
-      title: `Close bot ${botId}?`,
+      title: t('botDetail.confirmClose.title', { id: botId }),
       description: `${bot.pair} · ${bot.direction.toUpperCase()} · ${bot.leverage}x`,
       body: (
         <div className="space-y-2">
           <p className="font-semibold text-text-primary">
-            This is final. The bot will be marked{' '}
-            <Mono className="text-danger">stopped</Mono> and removed from the
-            active list.
+            {t('botDetail.confirmClose.finalLead')}{' '}
+            <Mono className="text-danger">{t('botDetail.confirmClose.stopped')}</Mono>{' '}
+            {t('botDetail.confirmClose.finalEnd')}
           </p>
-          <p>The engine will:</p>
+          <p>{t('botDetail.confirmClose.engineWill')}</p>
           <ul className="list-disc list-inside space-y-0.5 text-2xs">
             <li>
-              Cancel <Mono>{openOrderCount || 'ALL'}</Mono> open orders on GRVT
+              {openOrderCount
+                ? t('botDetail.confirmClose.cancelOrders', { n: openOrderCount })
+                : t('botDetail.confirmClose.cancelOrdersAll')}
             </li>
             {hasPosition ? (
               <li>
-                Market-close <Mono>{formatSize(Math.abs(positionSize))}</Mono>{' '}
-                ETH at ~0.5% aggressive limit (GTC) — small slippage cost
+                {t('botDetail.confirmClose.marketClose', {
+                  size: formatSize(Math.abs(positionSize)),
+                })}
               </li>
             ) : (
-              <li>No position to close (size = 0)</li>
+              <li>{t('botDetail.confirmClose.noPosition')}</li>
             )}
-            <li>Flip status to stopped (history is preserved)</li>
+            <li>{t('botDetail.confirmClose.flipStatus')}</li>
           </ul>
           <p className="text-2xs text-text-muted">
-            Use <strong className="text-text-primary">Pause</strong> instead if
-            you want to keep the position open and resume later.
+            {t('botDetail.confirmClose.pauseInstead')}
           </p>
         </div>
       ),
-      confirmLabel: hasPosition ? 'Cancel orders + close position' : 'Cancel all orders',
-      cancelLabel: 'Keep bot',
+      confirmLabel: hasPosition
+        ? t('botDetail.confirmClose.confirmWithPos')
+        : t('botDetail.confirmClose.confirmNoPos'),
+      cancelLabel: t('botDetail.confirmClose.cancel'),
     });
     if (ok) closeMutation.mutate();
   }
@@ -390,7 +400,7 @@ export function BotDetailPage() {
             <span className="text-2xs uppercase tracking-wider text-primary border border-primary/40 rounded-md px-2 py-0.5">
               {subAccountsQuery.data?.find(
                 (s) => s.id === bot.grvt_sub_account_id
-              )?.label ?? `Sub #${bot.grvt_sub_account_id}`}
+              )?.label ?? t('botDetail.subAccountFallback', { id: bot.grvt_sub_account_id })}
             </span>
           )}
         </div>
@@ -445,12 +455,12 @@ export function BotDetailPage() {
       {/* Top stat strip */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-px bg-border-subtle rounded-lg overflow-hidden">
         <StatCard
-          label="Equity"
+          label={t('botDetail.stat.equity')}
           value={formatUsd(equity)}
           delta={<Delta value={equityPct} format={formatPercent} />}
         />
         <StatCard
-          label="Total PnL"
+          label={t('botDetail.stat.totalPnl')}
           value={
             <span
               className={
@@ -465,9 +475,9 @@ export function BotDetailPage() {
             </span>
           }
         />
-        <StatCard label="Realized" value={formatPnl(gridProfit)} />
+        <StatCard label={t('botDetail.stat.realized')} value={formatPnl(gridProfit)} />
         <StatCard
-          label="Unrealized"
+          label={t('botDetail.stat.unrealized')}
           value={
             <span
               className={
@@ -483,7 +493,7 @@ export function BotDetailPage() {
           }
         />
         <StatCard
-          label="Position"
+          label={t('botDetail.stat.position')}
           value={`${formatSize(positionSize)}`}
           delta={
             <span className="text-xs text-text-muted">
@@ -492,7 +502,7 @@ export function BotDetailPage() {
           }
         />
         <StatCard
-          label="Liquidation"
+          label={t('botDetail.stat.liquidation')}
           value={
             bot.liquidation_price != null && bot.liquidation_price > 0
               ? formatUsd(bot.liquidation_price)
@@ -518,22 +528,22 @@ export function BotDetailPage() {
               {t('botDetail.gridChart')}
             </h2>
             <p className="text-2xs uppercase tracking-wider text-text-muted mt-0.5 flex items-center gap-2 flex-wrap">
-              <span>{bot.pair} · 1H · {levels.length} levels</span>
+              <span>{bot.pair} · 1H · {t('botDetail.chart.levels', { n: levels.length })}</span>
               {(() => {
                 const active = levels.filter((l) => l.is_filled === 0 && l.state !== 'virtual').length;
                 const virtual = levels.filter((l) => l.state === 'virtual').length;
                 const filled = levels.filter((l) => l.is_filled === 1).length;
                 return (
                   <span className="flex items-center gap-1.5 normal-case tracking-normal">
-                    <span className="text-emerald-400">{active} active</span>
+                    <span className="text-emerald-400">{t('botDetail.chart.active', { n: active })}</span>
                     {virtual > 0 && (
                       <>
                         <span className="text-text-muted">·</span>
-                        <span className="text-slate-500">{virtual} virtual</span>
+                        <span className="text-slate-500">{t('botDetail.chart.virtual', { n: virtual })}</span>
                       </>
                     )}
                     <span className="text-text-muted">·</span>
-                    <span className="text-text-muted">{filled} filled</span>
+                    <span className="text-text-muted">{t('botDetail.chart.filled', { n: filled })}</span>
                   </span>
                 );
               })()}
@@ -543,10 +553,10 @@ export function BotDetailPage() {
         </div>
         <div className="h-[320px] sm:h-[420px] md:h-[560px]">
           {candlesQuery.isPending ? (
-            <ChartSkeleton message="Loading candles…" />
+            <ChartSkeleton message={t('botDetail.chart.loadingCandles')} />
           ) : candlesQuery.isError ? (
             <ChartSkeleton
-              message={`Failed to load candles: ${(candlesQuery.error as Error).message}`}
+              message={t('botDetail.chart.failedCandles', { msg: (candlesQuery.error as Error).message })}
               error
             />
           ) : (
@@ -655,8 +665,8 @@ function RiskSettings({ bot }: { bot: any }) {
       qc.invalidateQueries({ queryKey: ['bot', bot.id] });
       toast.success(
         slNum == null && tpNum == null
-          ? 'Stop-loss and take-profit disabled'
-          : 'Risk settings updated'
+          ? t('botDetail.risk.disabledToast')
+          : t('botDetail.risk.updatedToast')
       );
     },
     onError: (err) => toast.error((err as Error).message),
@@ -670,8 +680,7 @@ function RiskSettings({ bot }: { bot: any }) {
             {t('botDetail.stopLossTakeProfit')}
           </h3>
           <p className="text-2xs text-text-muted mt-0.5">
-            Auto-close the bot when total PnL crosses these % thresholds
-            (relative to invested capital). Empty disables.
+            {t('botDetail.risk.helper')}
           </p>
         </div>
         <Button
@@ -679,14 +688,14 @@ function RiskSettings({ bot }: { bot: any }) {
           disabled={!dirty || slInvalid || tpInvalid || mut.isPending}
           onClick={() => mut.mutate()}
         >
-          {mut.isPending ? 'Saving...' : 'Save'}
+          {mut.isPending ? t('botDetail.risk.saving') : t('botDetail.risk.save')}
         </Button>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="text-2xs text-text-muted block mb-1">
-            Stop-loss (% of invested, max 100)
+            {t('botDetail.risk.slLabel')}
           </label>
           <input
             type="number"
@@ -694,7 +703,7 @@ function RiskSettings({ bot }: { bot: any }) {
             min="0"
             max="100"
             step="0.1"
-            placeholder="off"
+            placeholder={t('botDetail.risk.off')}
             value={sl}
             onChange={(e) => setSl(e.target.value)}
             className={`w-full bg-bg-base border rounded-md px-3 py-2 text-sm font-mono text-text-primary outline-none focus:ring-2 focus:ring-primary/50 ${
@@ -704,7 +713,7 @@ function RiskSettings({ bot }: { bot: any }) {
         </div>
         <div>
           <label className="text-2xs text-text-muted block mb-1">
-            Take-profit (% of invested, max 1000)
+            {t('botDetail.risk.tpLabel')}
           </label>
           <input
             type="number"
@@ -712,7 +721,7 @@ function RiskSettings({ bot }: { bot: any }) {
             min="0"
             max="1000"
             step="0.1"
-            placeholder="off"
+            placeholder={t('botDetail.risk.off')}
             value={tp}
             onChange={(e) => setTp(e.target.value)}
             className={`w-full bg-bg-base border rounded-md px-3 py-2 text-sm font-mono text-text-primary outline-none focus:ring-2 focus:ring-primary/50 ${
@@ -731,6 +740,7 @@ function RiskSettings({ bot }: { bot: any }) {
 // last_auto_shift_at. Cooldown is 1h between shifts.
 
 function AutoShiftStatus({ bot }: { bot: any }) {
+  const t = useT();
   const triggerPct = bot.auto_shift_pct ?? 0;
   const lastAt = bot.last_auto_shift_at as number | null | undefined;
   return (
@@ -738,16 +748,14 @@ function AutoShiftStatus({ bot }: { bot: any }) {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-text-primary">
-            Auto-shift
+            {t('botDetail.autoShift.title')}
           </h3>
           <p className="text-2xs text-text-muted mt-0.5">
-            Re-centers the grid on current price when price exits the
-            range by more than {triggerPct}% of the range width. Max
-            once per hour.
+            {t('botDetail.autoShift.helper', { pct: triggerPct })}
           </p>
         </div>
         <div className="text-right">
-          <div className="text-2xs text-text-muted">Last shift</div>
+          <div className="text-2xs text-text-muted">{t('botDetail.autoShift.lastShift')}</div>
           <Mono className="text-sm text-text-primary">
             {formatTimeUtc(lastAt ?? null)}
           </Mono>
@@ -760,6 +768,7 @@ function AutoShiftStatus({ bot }: { bot: any }) {
 // ── Compound Reinvestment Settings ──────────────────────────────────────
 
 function CompoundSettings({ bot }: { bot: any }) {
+  const t = useT();
   const qc = useQueryClient();
   const [pct, setPct] = useState<number>(bot.compound_pct ?? 0);
   const [threshold, setThreshold] = useState<number>(bot.compound_threshold_usdt ?? 50);
@@ -783,8 +792,8 @@ function CompoundSettings({ bot }: { bot: any }) {
       qc.invalidateQueries({ queryKey: ['bots'] });
       toast.success(
         pct > 0
-          ? `Compound set to ${pct}% every ${interval}h`
-          : 'Compound disabled'
+          ? t('botDetail.compound.enabledToast', { pct, h: interval })
+          : t('botDetail.compound.disabledToast')
       );
     },
     onError: (err) => toast.error((err as Error).message),
@@ -799,15 +808,15 @@ function CompoundSettings({ bot }: { bot: any }) {
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-semibold text-text-primary">
-            Reinvestment
+            {t('botDetail.compound.title')}
           </h3>
           <p className="text-2xs text-text-muted mt-0.5">
-            Auto-reinvest grid profit into larger orders
+            {t('botDetail.compound.helper')}
           </p>
         </div>
         {reinvested > 0 && (
           <div className="text-right">
-            <div className="text-2xs text-text-muted">Total reinvested</div>
+            <div className="text-2xs text-text-muted">{t('botDetail.compound.totalReinvested')}</div>
             <Mono className="text-sm text-success">
               {formatUsd(reinvested)}
             </Mono>
@@ -818,7 +827,7 @@ function CompoundSettings({ bot }: { bot: any }) {
       {/* Preset buttons */}
       <div className="flex items-center gap-2 mb-3">
         <span className="text-2xs text-text-muted w-20 shrink-0">
-          Reinvest %
+          {t('botDetail.compound.reinvestLabel')}
         </span>
         <div className="flex gap-1.5 flex-wrap">
           {presets.map((p) => (
@@ -854,14 +863,14 @@ function CompoundSettings({ bot }: { bot: any }) {
         onClick={() => setShowAdvanced(!showAdvanced)}
         className="text-2xs text-text-muted hover:text-text-secondary mb-2"
       >
-        {showAdvanced ? '- Hide' : '+ Show'} advanced
+        {showAdvanced ? t('botDetail.compound.hideAdvanced') : t('botDetail.compound.showAdvanced')}
       </button>
 
       {showAdvanced && (
         <div className="flex gap-4 mb-3">
           <label className="flex flex-col gap-1">
             <span className="text-2xs text-text-muted">
-              Min profit (USD)
+              {t('botDetail.compound.minProfit')}
             </span>
             <input
               type="number"
@@ -874,7 +883,7 @@ function CompoundSettings({ bot }: { bot: any }) {
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-2xs text-text-muted">
-              Check every (hours)
+              {t('botDetail.compound.checkEvery')}
             </span>
             <input
               type="number"
@@ -895,15 +904,15 @@ function CompoundSettings({ bot }: { bot: any }) {
           onClick={() => mutation.mutate()}
           disabled={!dirty || mutation.isPending}
         >
-          {mutation.isPending ? 'Saving…' : 'Save'}
+          {mutation.isPending ? t('botDetail.compound.saving') : t('botDetail.compound.save')}
         </Button>
         {lastAt && (
           <span className="text-2xs text-text-muted">
-            Last compound: {formatTimeUtc(lastAt)}
+            {t('botDetail.compound.lastCompound', { time: formatTimeUtc(lastAt) })}
           </span>
         )}
         {pct === 0 && !dirty && (
-          <span className="text-2xs text-text-muted">Disabled</span>
+          <span className="text-2xs text-text-muted">{t('botDetail.compound.disabledLabel')}</span>
         )}
       </div>
     </Card>
@@ -915,6 +924,7 @@ function CompoundSettings({ bot }: { bot: any }) {
 type DetailTab = 'roundtrips' | 'fills' | 'orders' | 'funding' | 'snapshots';
 
 function BotDetailTabs({ botId }: { botId: number }) {
+  const t = useT();
   const [tab, setTab] = useState<DetailTab>('roundtrips');
 
   // Fills come from fills_archive (populated by the engine's
@@ -959,27 +969,27 @@ function BotDetailTabs({ botId }: { botId: number }) {
           items={[
             {
               value: 'roundtrips',
-              label: 'Roundtrips',
+              label: t('botDetail.tabs.roundtrips'),
               badge: roundtripsQuery.data?.count ?? '—',
             },
             {
               value: 'fills',
-              label: 'Fills',
+              label: t('botDetail.tabs.fills'),
               badge: fillsQuery.data?.fills.length ?? '—',
             },
             {
               value: 'orders',
-              label: 'Orders',
+              label: t('botDetail.tabs.orders'),
               badge: ordersQuery.data?.orders.length ?? '—',
             },
             {
               value: 'funding',
-              label: 'Funding',
+              label: t('botDetail.tabs.funding'),
               badge: fundingQuery.data?.count ?? '—',
             },
             {
               value: 'snapshots',
-              label: 'Snapshots',
+              label: t('botDetail.tabs.snapshots'),
               badge: snapshotsQuery.data?.snapshots.length ?? '—',
             },
           ]}
@@ -1025,65 +1035,68 @@ function BotDetailTabs({ botId }: { botId: number }) {
 
 // ── Roundtrips Table ──────────────────────────────────────────────────
 
-const ROUNDTRIP_COLUMNS: Column<Roundtrip>[] = [
-  {
-    key: 'time',
-    header: 'Time (UTC)',
-    render: (r) => formatTimeUtc(new Date(r.created_at).getTime()),
-    sortValue: (r) => new Date(r.created_at).getTime(),
-    mono: true,
-    width: '160px',
-  },
-  {
-    key: 'buy_price',
-    header: 'Buy',
-    render: (r) => formatUsd(r.buy_price),
-    sortValue: (r) => r.buy_price,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'sell_price',
-    header: 'Sell',
-    render: (r) => formatUsd(r.sell_price),
-    sortValue: (r) => r.sell_price,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'spread',
-    header: 'Spread',
-    render: (r) => {
-      const spread = r.sell_price - r.buy_price;
-      return (
-        <span className="text-text-secondary">{formatUsd(spread)}</span>
-      );
+function useRoundtripColumns(): Column<Roundtrip>[] {
+  const t = useT();
+  return [
+    {
+      key: 'time',
+      header: t('botDetail.tables.colTime'),
+      render: (r) => formatTimeUtc(new Date(r.created_at).getTime()),
+      sortValue: (r) => new Date(r.created_at).getTime(),
+      mono: true,
+      width: '160px',
     },
-    sortValue: (r) => r.sell_price - r.buy_price,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'size',
-    header: 'Size',
-    render: (r) => formatSize(r.size),
-    sortValue: (r) => r.size,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'profit',
-    header: 'Profit',
-    render: (r) => (
-      <span className={r.profit > 0 ? 'text-success font-semibold' : 'text-danger font-semibold'}>
-        {formatPnl(r.profit)}
-      </span>
-    ),
-    sortValue: (r) => r.profit,
-    align: 'right',
-    mono: true,
-  },
-];
+    {
+      key: 'buy_price',
+      header: t('botDetail.tables.colBuy'),
+      render: (r) => formatUsd(r.buy_price),
+      sortValue: (r) => r.buy_price,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'sell_price',
+      header: t('botDetail.tables.colSell'),
+      render: (r) => formatUsd(r.sell_price),
+      sortValue: (r) => r.sell_price,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'spread',
+      header: t('botDetail.tables.colSpread'),
+      render: (r) => {
+        const spread = r.sell_price - r.buy_price;
+        return (
+          <span className="text-text-secondary">{formatUsd(spread)}</span>
+        );
+      },
+      sortValue: (r) => r.sell_price - r.buy_price,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'size',
+      header: t('botDetail.tables.colSize'),
+      render: (r) => formatSize(r.size),
+      sortValue: (r) => r.size,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'profit',
+      header: t('botDetail.tables.colProfit'),
+      render: (r) => (
+        <span className={r.profit > 0 ? 'text-success font-semibold' : 'text-danger font-semibold'}>
+          {formatPnl(r.profit)}
+        </span>
+      ),
+      sortValue: (r) => r.profit,
+      align: 'right',
+      mono: true,
+    },
+  ];
+}
 
 function RoundtripsTable({
   roundtrips,
@@ -1094,10 +1107,12 @@ function RoundtripsTable({
   totalProfit: number;
   loading: boolean;
 }) {
+  const t = useT();
+  const columns = useRoundtripColumns();
   if (loading) {
     return (
       <div className="text-center py-8 text-sm text-text-muted animate-pulse">
-        Loading roundtrips…
+        {t('botDetail.tables.loadingRoundtrips')}
       </div>
     );
   }
@@ -1105,17 +1120,17 @@ function RoundtripsTable({
     <div>
       <div className="flex items-center justify-end pb-3 px-3 text-xs gap-4">
         <span className="text-text-muted">
-          <Mono>{roundtrips.length}</Mono> paired roundtrips
+          {t('botDetail.tables.pairedCount', { n: roundtrips.length })}
         </span>
         <span className="text-text-muted uppercase tracking-wider">
-          Total profit:
+          {t('botDetail.tables.totalProfit')}
         </span>
         <span className={totalProfit > 0 ? 'text-success font-semibold' : 'text-danger font-semibold'}>
           <Mono>{formatPnl(totalProfit)}</Mono>
         </span>
       </div>
       <DataTable
-        columns={ROUNDTRIP_COLUMNS}
+        columns={columns}
         rows={roundtrips}
         rowKey={(r) => r.id}
         pageSize={20}
@@ -1138,102 +1153,112 @@ function formatFee4(value: number): string {
   return `${sign}$${Math.abs(value).toFixed(4)}`;
 }
 
-function renderFee(fee: number): React.ReactNode {
-  if (fee === 0) return <span className="text-text-disabled">—</span>;
-  // Negative fee = rebate earned. Display as a positive PnL.
-  const earned = -fee;
-  return (
-    <span
-      className={earned > 0 ? 'text-success' : 'text-danger'}
-      title={
-        (earned > 0 ? 'Maker rebate earned: ' : 'Taker fee paid: ') +
-        `$${earned.toFixed(6)}`
-      }
-    >
-      {formatFee4(earned)}
-    </span>
-  );
-}
-
-const FILLS_COLUMNS: Column<FillRow>[] = [
-  {
-    key: 'time',
-    header: 'Time (UTC)',
-    render: (r) => formatTimeUtc(new Date(r.created_at).getTime()),
-    sortValue: (r) => new Date(r.created_at).getTime(),
-    mono: true,
-    width: '160px',
-  },
-  {
-    key: 'side',
-    header: 'Side',
-    render: (r) => (
+function useRenderFee(): (fee: number) => React.ReactNode {
+  const t = useT();
+  return (fee: number) => {
+    if (fee === 0) return <span className="text-text-disabled">—</span>;
+    const earned = -fee;
+    return (
       <span
-        className={
-          r.is_buyer === 1
-            ? 'text-success font-semibold uppercase'
-            : 'text-danger font-semibold uppercase'
+        className={earned > 0 ? 'text-success' : 'text-danger'}
+        title={
+          (earned > 0
+            ? t('botDetail.tables.rebateEarned')
+            : t('botDetail.tables.feePaid')) +
+          `$${earned.toFixed(6)}`
         }
       >
-        {r.is_buyer === 1 ? 'BUY' : 'SELL'}
+        {formatFee4(earned)}
       </span>
-    ),
-    align: 'center',
-    width: '80px',
-  },
-  {
-    key: 'price',
-    header: 'Price',
-    render: (r) => formatUsd(r.price),
-    sortValue: (r) => r.price,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'size',
-    header: 'Size',
-    render: (r) => formatSize(r.size),
-    sortValue: (r) => r.size,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'notional',
-    header: 'Notional',
-    render: (r) => formatUsd(r.price * r.size),
-    sortValue: (r) => r.price * r.size,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'fee',
-    header: 'Fee / Rebate',
-    render: (r) => renderFee(r.fee),
-    sortValue: (r) => r.fee,
-    align: 'right',
-    mono: true,
-  },
-];
+    );
+  };
+}
+
+function useFillsColumns(): Column<FillRow>[] {
+  const t = useT();
+  const renderFee = useRenderFee();
+  return [
+    {
+      key: 'time',
+      header: t('botDetail.tables.colTime'),
+      render: (r) => formatTimeUtc(new Date(r.created_at).getTime()),
+      sortValue: (r) => new Date(r.created_at).getTime(),
+      mono: true,
+      width: '160px',
+    },
+    {
+      key: 'side',
+      header: t('botDetail.tables.colSide'),
+      render: (r) => (
+        <span
+          className={
+            r.is_buyer === 1
+              ? 'text-success font-semibold uppercase'
+              : 'text-danger font-semibold uppercase'
+          }
+        >
+          {r.is_buyer === 1
+            ? t('botDetail.tables.sideBuy')
+            : t('botDetail.tables.sideSell')}
+        </span>
+      ),
+      align: 'center',
+      width: '80px',
+    },
+    {
+      key: 'price',
+      header: t('botDetail.tables.colPrice'),
+      render: (r) => formatUsd(r.price),
+      sortValue: (r) => r.price,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'size',
+      header: t('botDetail.tables.colSize'),
+      render: (r) => formatSize(r.size),
+      sortValue: (r) => r.size,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'notional',
+      header: t('botDetail.tables.colNotional'),
+      render: (r) => formatUsd(r.price * r.size),
+      sortValue: (r) => r.price * r.size,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'fee',
+      header: t('botDetail.tables.colFeeRebate'),
+      render: (r) => renderFee(r.fee),
+      sortValue: (r) => r.fee,
+      align: 'right',
+      mono: true,
+    },
+  ];
+}
 
 function FillsTable({ fills, loading }: { fills: FillRow[]; loading: boolean }) {
+  const t = useT();
+  const columns = useFillsColumns();
   if (loading) {
     return (
       <div className="text-center py-8 text-sm text-text-muted animate-pulse">
-        Loading fills…
+        {t('botDetail.tables.loadingFills')}
       </div>
     );
   }
-  // Sum of (-fee) so positive = net rebate earned, negative = net fees paid.
-  // ALL real GRVT data — sums whatever GRVT actually charged this account.
   const netRebate = fills.reduce((acc, f) => acc + -f.fee, 0);
   return (
     <div>
       <div className="flex items-center justify-end pb-3 px-3 text-xs gap-4">
         <span className="text-text-muted">
-          Showing last <Mono>{fills.length}</Mono> fills
+          {t('botDetail.tables.showingLast', { n: fills.length })}
         </span>
         <span className="text-text-muted uppercase tracking-wider">
-          Net rebate this window:
+          {t('botDetail.tables.netRebateWindow')}
         </span>
         <span
           className={
@@ -1249,77 +1274,80 @@ function FillsTable({ fills, loading }: { fills: FillRow[]; loading: boolean }) 
       </div>
       <DataTable
         rows={fills}
-        columns={FILLS_COLUMNS}
+        columns={columns}
         pageSize={20}
         rowKey={(r) => r.id}
-        emptyMessage="No fills yet (the engine polls fills every 30s)"
+        emptyMessage={t('botDetail.tables.emptyFills')}
       />
     </div>
   );
 }
 
-const SNAPSHOT_COLUMNS: Column<DailySnapshot>[] = [
-  {
-    key: 'date',
-    header: 'Date',
-    render: (r) => r.date,
-    sortValue: (r) => r.date,
-    mono: true,
-    width: '140px',
-  },
-  {
-    key: 'equity',
-    header: 'Equity',
-    render: (r) => formatUsd(r.equity_usdt),
-    sortValue: (r) => r.equity_usdt,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'realized',
-    header: 'Realized',
-    render: (r) => formatPnl(r.realized_pnl_usdt),
-    sortValue: (r) => r.realized_pnl_usdt,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'unrealized',
-    header: 'Unrealized',
-    render: (r) => (
-      <span
-        className={
-          r.unrealized_pnl_usdt > 0
-            ? 'text-success'
-            : r.unrealized_pnl_usdt < 0
-              ? 'text-danger'
-              : ''
-        }
-      >
-        {formatPnl(r.unrealized_pnl_usdt)}
-      </span>
-    ),
-    sortValue: (r) => r.unrealized_pnl_usdt,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'rt',
-    header: 'Round trips',
-    render: (r) => String(r.num_round_trips),
-    sortValue: (r) => r.num_round_trips,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'fees',
-    header: 'Fees',
-    render: (r) => formatUsd(r.total_fees_usdt),
-    sortValue: (r) => r.total_fees_usdt,
-    align: 'right',
-    mono: true,
-  },
-];
+function useSnapshotColumns(): Column<DailySnapshot>[] {
+  const t = useT();
+  return [
+    {
+      key: 'date',
+      header: t('botDetail.tables.colDate'),
+      render: (r) => r.date,
+      sortValue: (r) => r.date,
+      mono: true,
+      width: '140px',
+    },
+    {
+      key: 'equity',
+      header: t('botDetail.tables.colEquity'),
+      render: (r) => formatUsd(r.equity_usdt),
+      sortValue: (r) => r.equity_usdt,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'realized',
+      header: t('botDetail.tables.colRealized'),
+      render: (r) => formatPnl(r.realized_pnl_usdt),
+      sortValue: (r) => r.realized_pnl_usdt,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'unrealized',
+      header: t('botDetail.tables.colUnrealized'),
+      render: (r) => (
+        <span
+          className={
+            r.unrealized_pnl_usdt > 0
+              ? 'text-success'
+              : r.unrealized_pnl_usdt < 0
+                ? 'text-danger'
+                : ''
+          }
+        >
+          {formatPnl(r.unrealized_pnl_usdt)}
+        </span>
+      ),
+      sortValue: (r) => r.unrealized_pnl_usdt,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'rt',
+      header: t('botDetail.tables.colRoundTrips'),
+      render: (r) => String(r.num_round_trips),
+      sortValue: (r) => r.num_round_trips,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'fees',
+      header: t('botDetail.tables.colFees'),
+      render: (r) => formatUsd(r.total_fees_usdt),
+      sortValue: (r) => r.total_fees_usdt,
+      align: 'right',
+      mono: true,
+    },
+  ];
+}
 
 function SnapshotsTable({
   snapshots,
@@ -1328,20 +1356,22 @@ function SnapshotsTable({
   snapshots: DailySnapshot[];
   loading: boolean;
 }) {
+  const t = useT();
+  const columns = useSnapshotColumns();
   if (loading) {
     return (
       <div className="text-center py-8 text-sm text-text-muted animate-pulse">
-        Loading snapshots…
+        {t('botDetail.tables.loadingSnapshots')}
       </div>
     );
   }
   return (
     <DataTable
       rows={snapshots}
-      columns={SNAPSHOT_COLUMNS}
+      columns={columns}
       pageSize={20}
       rowKey={(r) => r.id}
-      emptyMessage="No snapshots yet"
+      emptyMessage={t('botDetail.tables.emptySnapshots')}
     />
   );
 }
@@ -1355,74 +1385,77 @@ const ORDER_STATUS_TONE: Record<OrderRow['status'], string> = {
   rejected: 'text-danger',
 };
 
-const ORDERS_COLUMNS: Column<OrderRow>[] = [
-  {
-    key: 'time',
-    header: 'Updated',
-    render: (r) => formatTimeUtc(new Date(r.updated_at).getTime()),
-    sortValue: (r) => new Date(r.updated_at).getTime(),
-    mono: true,
-    width: '160px',
-  },
-  {
-    key: 'side',
-    header: 'Side',
-    render: (r) => (
-      <span
-        className={
-          r.side === 'buy'
-            ? 'text-success font-semibold uppercase'
-            : 'text-danger font-semibold uppercase'
-        }
-      >
-        {r.side}
-      </span>
-    ),
-    align: 'center',
-    width: '70px',
-  },
-  {
-    key: 'type',
-    header: 'Type',
-    render: (r) => (
-      <span className="uppercase text-2xs tracking-wider">{r.type}</span>
-    ),
-    align: 'center',
-    width: '70px',
-  },
-  {
-    key: 'price',
-    header: 'Price',
-    render: (r) => formatUsd(r.price),
-    sortValue: (r) => r.price,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'qty',
-    header: 'Size',
-    render: (r) => formatSize(r.quantity),
-    sortValue: (r) => r.quantity,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'status',
-    header: 'Status',
-    render: (r) => (
-      <span className={`${ORDER_STATUS_TONE[r.status]} uppercase tracking-wider text-2xs font-semibold`}>
-        {r.status}
-      </span>
-    ),
-    align: 'center',
-  },
-  {
-    key: 'order_id',
-    header: 'Order ID',
-    render: (r) => <span className="text-text-muted text-2xs">{r.order_id.slice(0, 12)}…</span>,
-    align: 'left',
-  },
-];
+function useOrdersColumns(): Column<OrderRow>[] {
+  const t = useT();
+  return [
+    {
+      key: 'time',
+      header: t('botDetail.tables.colUpdated'),
+      render: (r) => formatTimeUtc(new Date(r.updated_at).getTime()),
+      sortValue: (r) => new Date(r.updated_at).getTime(),
+      mono: true,
+      width: '160px',
+    },
+    {
+      key: 'side',
+      header: t('botDetail.tables.colSide'),
+      render: (r) => (
+        <span
+          className={
+            r.side === 'buy'
+              ? 'text-success font-semibold uppercase'
+              : 'text-danger font-semibold uppercase'
+          }
+        >
+          {r.side}
+        </span>
+      ),
+      align: 'center',
+      width: '70px',
+    },
+    {
+      key: 'type',
+      header: t('botDetail.tables.colType'),
+      render: (r) => (
+        <span className="uppercase text-2xs tracking-wider">{r.type}</span>
+      ),
+      align: 'center',
+      width: '70px',
+    },
+    {
+      key: 'price',
+      header: t('botDetail.tables.colPrice'),
+      render: (r) => formatUsd(r.price),
+      sortValue: (r) => r.price,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'qty',
+      header: t('botDetail.tables.colSize'),
+      render: (r) => formatSize(r.quantity),
+      sortValue: (r) => r.quantity,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'status',
+      header: t('botDetail.tables.colStatus'),
+      render: (r) => (
+        <span className={`${ORDER_STATUS_TONE[r.status]} uppercase tracking-wider text-2xs font-semibold`}>
+          {r.status}
+        </span>
+      ),
+      align: 'center',
+    },
+    {
+      key: 'order_id',
+      header: t('botDetail.tables.colOrderId'),
+      render: (r) => <span className="text-text-muted text-2xs">{r.order_id.slice(0, 12)}…</span>,
+      align: 'left',
+    },
+  ];
+}
 
 function OrdersTable({
   orders,
@@ -1435,17 +1468,19 @@ function OrdersTable({
   degraded?: boolean;
   hint?: string;
 }) {
+  const t = useT();
+  const columns = useOrdersColumns();
   if (loading) {
     return (
       <div className="text-center py-8 text-sm text-text-muted animate-pulse">
-        Loading orders…
+        {t('botDetail.tables.loadingOrders')}
       </div>
     );
   }
   if (degraded) {
     return (
       <div className="text-center py-8 text-sm text-warning">
-        Orders table degraded
+        {t('botDetail.tables.ordersDegraded')}
         {hint && <div className="text-2xs text-text-muted mt-1">{hint}</div>}
       </div>
     );
@@ -1453,65 +1488,68 @@ function OrdersTable({
   return (
     <DataTable
       rows={orders}
-      columns={ORDERS_COLUMNS}
+      columns={columns}
       pageSize={20}
       rowKey={(r) => r.id}
-      emptyMessage="No orders in local DB yet"
+      emptyMessage={t('botDetail.tables.emptyOrders')}
     />
   );
 }
 
 // ── Funding ───────────────────────────────────────────────────────────
 
-const FUNDING_COLUMNS: Column<FundingRow>[] = [
-  {
-    key: 'time',
-    header: 'Time (UTC)',
-    render: (r) => {
-      const ms = new Date(r.funding_time).getTime();
-      return formatTimeUtc(ms);
+function useFundingColumns(): Column<FundingRow>[] {
+  const t = useT();
+  return [
+    {
+      key: 'time',
+      header: t('botDetail.tables.colTime'),
+      render: (r) => {
+        const ms = new Date(r.funding_time).getTime();
+        return formatTimeUtc(ms);
+      },
+      sortValue: (r) => new Date(r.funding_time).getTime(),
+      mono: true,
+      width: '160px',
     },
-    sortValue: (r) => new Date(r.funding_time).getTime(),
-    mono: true,
-    width: '160px',
-  },
-  {
-    key: 'rate',
-    header: 'Rate',
-    render: (r) => `${(r.funding_rate * 100).toFixed(4)}%`,
-    sortValue: (r) => r.funding_rate,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'pos',
-    header: 'Position',
-    render: (r) => formatSize(r.position_size),
-    sortValue: (r) => r.position_size,
-    align: 'right',
-    mono: true,
-  },
-  {
-    key: 'payment',
-    header: 'Payment',
-    render: (r) => (
-      <span
-        className={
-          r.payment_usdt > 0
-            ? 'text-success'
-            : r.payment_usdt < 0
-              ? 'text-danger'
-              : ''
-        }
-      >
-        {formatPnl(r.payment_usdt)}
-      </span>
-    ),
-    sortValue: (r) => r.payment_usdt,
-    align: 'right',
-    mono: true,
-  },
-];
+    {
+      key: 'rate',
+      header: t('botDetail.tables.colRate'),
+      render: (r) => `${(r.funding_rate * 100).toFixed(4)}%`,
+      sortValue: (r) => r.funding_rate,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'pos',
+      header: t('botDetail.tables.colPosition'),
+      render: (r) => formatSize(r.position_size),
+      sortValue: (r) => r.position_size,
+      align: 'right',
+      mono: true,
+    },
+    {
+      key: 'payment',
+      header: t('botDetail.tables.colPayment'),
+      render: (r) => (
+        <span
+          className={
+            r.payment_usdt > 0
+              ? 'text-success'
+              : r.payment_usdt < 0
+                ? 'text-danger'
+                : ''
+          }
+        >
+          {formatPnl(r.payment_usdt)}
+        </span>
+      ),
+      sortValue: (r) => r.payment_usdt,
+      align: 'right',
+      mono: true,
+    },
+  ];
+}
 
 function FundingTable({
   funding,
@@ -1522,10 +1560,12 @@ function FundingTable({
   total: number;
   loading: boolean;
 }) {
+  const t = useT();
+  const columns = useFundingColumns();
   if (loading) {
     return (
       <div className="text-center py-8 text-sm text-text-muted animate-pulse">
-        Loading funding…
+        {t('botDetail.tables.loadingFunding')}
       </div>
     );
   }
@@ -1533,7 +1573,7 @@ function FundingTable({
     <div>
       <div className="flex items-center justify-end pb-3 px-3 text-xs">
         <span className="text-text-muted uppercase tracking-wider mr-2">
-          Total
+          {t('botDetail.tables.total')}
         </span>
         <span
           className={
@@ -1549,16 +1589,17 @@ function FundingTable({
       </div>
       <DataTable
         rows={funding}
-        columns={FUNDING_COLUMNS}
+        columns={columns}
         pageSize={20}
         rowKey={(r) => r.id}
-        emptyMessage="No funding events recorded"
+        emptyMessage={t('botDetail.tables.emptyFunding')}
       />
     </div>
   );
 }
 
 function BotDetailEquityCurve({ botId }: { botId: number }) {
+  const t = useT();
   const snapshotsQuery = useQuery({
     queryKey: ['snapshots', botId],
     queryFn: () => api.getSnapshots(botId),
@@ -1567,7 +1608,7 @@ function BotDetailEquityCurve({ botId }: { botId: number }) {
   if (snapshotsQuery.isPending) {
     return (
       <div className="h-60 flex items-center justify-center text-sm text-text-muted animate-pulse">
-        Loading…
+        {t('botDetail.tables.loadingShort')}
       </div>
     );
   }
@@ -1575,14 +1616,15 @@ function BotDetailEquityCurve({ botId }: { botId: number }) {
 }
 
 function ChartLegend() {
+  const t = useT();
   return (
     <div className="hidden md:flex items-center gap-4 text-2xs">
-      <LegendDot color="bg-success" label="BUY" />
-      <LegendDot color="bg-danger" label="SELL" />
-      <LegendDot color="bg-slate-700" label="VIRTUAL" />
-      <LegendDot color="bg-border-strong" label="FILLED" />
-      <LegendDot color="bg-warning" label="PENDING" />
-      <LegendDot color="bg-primary" label="MARK" />
+      <LegendDot color="bg-success" label={t('botDetail.chart.legendBuy')} />
+      <LegendDot color="bg-danger" label={t('botDetail.chart.legendSell')} />
+      <LegendDot color="bg-slate-700" label={t('botDetail.chart.legendVirtual')} />
+      <LegendDot color="bg-border-strong" label={t('botDetail.chart.legendFilled')} />
+      <LegendDot color="bg-warning" label={t('botDetail.chart.legendPending')} />
+      <LegendDot color="bg-primary" label={t('botDetail.chart.legendMark')} />
     </div>
   );
 }

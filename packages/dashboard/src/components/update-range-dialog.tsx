@@ -3,18 +3,6 @@
 // plan builder, then explicit commit. The user always sees exactly
 // what will happen (orders to cancel, ETH to auto-buy, slippage cost)
 // before pressing Apply.
-//
-// What the engine does on commit (server side, mirrored from the plan):
-//   1. Re-runs buildRangeUpdatePlan() — same code path as preview, so
-//      the user is committing to exactly what they saw
-//   2. Refuses on safety violations (mark outside range, deficit > cap, etc.)
-//   3. Short-circuits on no-op (same range as current)
-//   4. Acquires per-bot mutex (monitor() skips during the mutation)
-//   5. Market-buys ETH deficit if any (verifying fill before touching DB)
-//   6. Atomically replaces all grid_levels in a single transaction
-//   7. Updates bot.lower_price / bot.upper_price
-//   8. Places fresh limit orders
-//   9. Releases mutex
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -27,19 +15,15 @@ import { Mono } from '@/components/primitives/mono';
 import { api } from '@/lib/api-client';
 import { formatUsd } from '@/lib/format';
 import type { BotSummary, RangeUpdatePlan } from '@/lib/api-types';
+import { useT } from '@/i18n';
 
 interface UpdateRangeDialogProps {
   open: boolean;
   onClose: () => void;
   bot: BotSummary;
-  // Live mark price from the grid-state query, used to render the
-  // "current state" strip and the out-of-grid warning. Authoritative
-  // mark for the preview comes from the server response.
   markPrice: number | null;
 }
 
-// Cheap debounce hook so we don't fire a /preview request on every
-// keystroke. 400ms is a good balance: feels live, doesn't hammer.
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -55,10 +39,9 @@ export function UpdateRangeDialog({
   bot,
   markPrice,
 }: UpdateRangeDialogProps) {
+  const t = useT();
   const queryClient = useQueryClient();
 
-  // Local form state — initialized from the bot's current range each
-  // time the dialog opens, so cancel + reopen always shows fresh values.
   const [lower, setLower] = useState<string>('');
   const [upper, setUpper] = useState<string>('');
   const [touchedLower, setTouchedLower] = useState(false);
@@ -79,18 +62,15 @@ export function UpdateRangeDialog({
   const upperValid = Number.isFinite(upperNum) && upperNum > 0;
   const orderingValid = lowerValid && upperValid && lowerNum < upperNum;
 
-  // Inline validation (on blur, not keystroke) for the form itself.
-  // Server-side violations come back via the preview query.
   const lowerError =
     touchedLower && !lowerValid
-      ? 'Must be a positive number'
+      ? t('updateRange.mustBePositive')
       : touchedLower && lowerValid && upperValid && lowerNum >= upperNum
-        ? 'Must be less than upper price'
+        ? t('updateRange.mustBeLessThanUpper')
         : undefined;
   const upperError =
-    touchedUpper && !upperValid ? 'Must be a positive number' : undefined;
+    touchedUpper && !upperValid ? t('updateRange.mustBePositive') : undefined;
 
-  // Debounce the inputs so /preview is only called when the user pauses.
   const debouncedLower = useDebounced(lowerNum, 400);
   const debouncedUpper = useDebounced(upperNum, 400);
   const debouncedValid =
@@ -100,8 +80,6 @@ export function UpdateRangeDialog({
     debouncedUpper > 0 &&
     debouncedLower < debouncedUpper;
 
-  // Live preview — re-runs whenever the debounced inputs change.
-  // Server returns a full plan including server-side safety violations.
   const previewQuery = useQuery({
     queryKey: ['range-preview', bot.id, debouncedLower, debouncedUpper],
     queryFn: () =>
@@ -116,10 +94,6 @@ export function UpdateRangeDialog({
 
   const plan: RangeUpdatePlan | null = previewQuery.data?.plan ?? null;
 
-  // Snapshot the order count BEFORE the mutation starts so the
-  // progress UI can detect the cancel→place transition. We capture
-  // it from the plan (ordersToCancel) which the preview already
-  // computed. Total target = plan.levelsToCreate.
   const ordersAtStart = plan?.ordersToCancel ?? 0;
   const totalTarget = plan?.levelsToCreate ?? 0;
 
@@ -128,24 +102,20 @@ export function UpdateRangeDialog({
       api.updateBotRange(bot.id, { lowerPrice: lowerNum, upperPrice: upperNum }),
     onSuccess: () => {
       toast.success(
-        `Range updated: ${formatUsd(lowerNum)} — ${formatUsd(upperNum)}`
+        t('updateRange.successToast', {
+          lower: formatUsd(lowerNum),
+          upper: formatUsd(upperNum),
+        })
       );
       void queryClient.invalidateQueries({ queryKey: ['bot', bot.id] });
       void queryClient.invalidateQueries({ queryKey: ['bots'] });
       void queryClient.invalidateQueries({ queryKey: ['gridState', bot.id] });
       onClose();
     },
-    onError: (err: Error) => toast.error(`Range update failed: ${err.message}`),
+    onError: (err: Error) =>
+      toast.error(t('updateRange.failedToast', { msg: err.message })),
   });
 
-  // Poll grid-state every 1s while the mutation is in flight so we
-  // can show real progress instead of a 90-second "Updating…". The
-  // server-side flow is:
-  //   1. Cancel all current orders     (ordersAtStart → 0)
-  //   2. Optional market-buy ETH       (no order count change)
-  //   3. Place new orders              (0 → totalTarget)
-  // We use openOrders.length to detect which phase we're in and
-  // compute a single 0-100 progress.
   const progressQuery = useQuery({
     queryKey: ['range-update-progress', bot.id],
     queryFn: () => api.getGridState(bot.id),
@@ -154,40 +124,35 @@ export function UpdateRangeDialog({
     refetchIntervalInBackground: true,
   });
 
-  // Phase + progress computation. The cancel phase counts down from
-  // ordersAtStart to 0, then the place phase counts up from 0 to
-  // totalTarget. We split the bar 50/50 between the two phases so
-  // 100% maps to "all new orders placed".
   const liveOrderCount = progressQuery.data?.openOrders.length ?? ordersAtStart;
   let progressPct = 0;
-  let phaseText = 'Starting…';
+  let phaseText = t('updateRange.phaseStarting');
   if (mutation.isPending && totalTarget > 0) {
     if (liveOrderCount > 0 && liveOrderCount >= ordersAtStart * 0.95) {
-      // Still in cancel phase (orders > 95% of original)
-      phaseText = `Cancelling old orders (${liveOrderCount}/${ordersAtStart})…`;
+      phaseText = t('updateRange.phaseCancelling', {
+        n: liveOrderCount,
+        total: ordersAtStart,
+      });
       progressPct = 5;
     } else if (liveOrderCount > totalTarget * 0.5 && liveOrderCount < ordersAtStart) {
-      // Cancel mostly done, mid-transition
-      phaseText = 'Cancelling old orders…';
+      phaseText = t('updateRange.phaseCancellingShort');
       progressPct = 25;
     } else if (liveOrderCount === 0 || liveOrderCount < totalTarget * 0.1) {
-      // Cancel done, place not yet started or just started
       phaseText = plan?.autoBuy
-        ? `Buying ${plan.autoBuy.size.toFixed(2)} ETH…`
-        : 'Placing new orders…';
+        ? t('updateRange.phaseBuying', { size: plan.autoBuy.size.toFixed(2) })
+        : t('updateRange.phasePlacingShort');
       progressPct = 50;
     } else {
-      // Place phase: counting up to totalTarget
       const placed = liveOrderCount;
       const placePct = Math.min(100, (placed / totalTarget) * 100);
-      phaseText = `Placing new orders (${placed}/${totalTarget})…`;
+      phaseText = t('updateRange.phasePlacing', {
+        n: placed,
+        total: totalTarget,
+      });
       progressPct = 50 + placePct * 0.5;
     }
   }
 
-  // Submit gating: form valid + plan loaded + zero violations + not pending.
-  // Note: a no-op is technically allowed (server short-circuits) but we
-  // hide the button to avoid confusion.
   const hasViolations = (plan?.safetyViolations.length ?? 0) > 0;
   const canSubmit =
     orderingValid &&
@@ -198,12 +163,12 @@ export function UpdateRangeDialog({
     !previewQuery.isFetching;
 
   const submitLabel = useMemo(() => {
-    if (mutation.isPending) return 'Updating…';
-    if (previewQuery.isFetching) return 'Calculating…';
-    if (plan?.noop) return 'No change';
-    if (hasViolations) return 'Cannot apply';
-    return 'Apply new range';
-  }, [mutation.isPending, previewQuery.isFetching, plan?.noop, hasViolations]);
+    if (mutation.isPending) return t('updateRange.submitUpdating');
+    if (previewQuery.isFetching) return t('updateRange.submitCalculating');
+    if (plan?.noop) return t('updateRange.submitNoChange');
+    if (hasViolations) return t('updateRange.submitCannot');
+    return t('updateRange.submitApply');
+  }, [mutation.isPending, previewQuery.isFetching, plan?.noop, hasViolations, t]);
 
   function handleSubmit() {
     setTouchedLower(true);
@@ -216,7 +181,7 @@ export function UpdateRangeDialog({
     <Modal
       open={open}
       onClose={mutation.isPending ? () => {} : onClose}
-      title="Update grid range"
+      title={t('updateRange.title')}
       description={`${bot.pair} · ${bot.direction.toUpperCase()} · ${bot.leverage}x`}
       footer={
         <>
@@ -225,7 +190,7 @@ export function UpdateRangeDialog({
             onClick={onClose}
             disabled={mutation.isPending}
           >
-            Cancel
+            {t('updateRange.cancel')}
           </Button>
           <Button
             variant="primary"
@@ -238,10 +203,9 @@ export function UpdateRangeDialog({
       }
     >
       <div className="space-y-5">
-        {/* Current state strip */}
         <div className="flex items-center gap-3 text-2xs uppercase tracking-wider">
           <div className="flex-1">
-            <div className="text-text-muted">Current range</div>
+            <div className="text-text-muted">{t('updateRange.currentRange')}</div>
             <div className="text-text-primary text-sm normal-case tracking-normal">
               <Mono>
                 {formatUsd(bot.lower_price)} — {formatUsd(bot.upper_price)}
@@ -250,7 +214,7 @@ export function UpdateRangeDialog({
           </div>
           <ArrowRight className="size-4 text-text-muted shrink-0" />
           <div className="flex-1">
-            <div className="text-text-muted">Mark price</div>
+            <div className="text-text-muted">{t('updateRange.markPrice')}</div>
             <div className="text-sm normal-case tracking-normal">
               {markPrice !== null ? (
                 <Mono
@@ -269,23 +233,20 @@ export function UpdateRangeDialog({
           </div>
         </div>
 
-        {/* Out-of-grid warning */}
         {markPrice !== null &&
           (markPrice < bot.lower_price || markPrice > bot.upper_price) && (
             <div className="flex items-start gap-2 p-3 rounded-md bg-warning-soft border border-warning/30">
               <AlertTriangle className="size-4 text-warning shrink-0 mt-0.5" />
               <div className="text-2xs text-warning-strong">
-                <strong>Mark price is outside the current grid.</strong> The
-                bot has no orders being filled. Update the range to cover the
-                current price so it can resume earning.
+                <strong>{t('updateRange.outOfGridTitle')}</strong>{' '}
+                {t('updateRange.outOfGridBody')}
               </div>
             </div>
           )}
 
-        {/* New range form */}
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="New lower price"
+            label={t('updateRange.newLowerPrice')}
             numeric
             inputMode="decimal"
             value={lower}
@@ -295,7 +256,7 @@ export function UpdateRangeDialog({
             disabled={mutation.isPending}
           />
           <Input
-            label="New upper price"
+            label={t('updateRange.newUpperPrice')}
             numeric
             inputMode="decimal"
             value={upper}
@@ -306,10 +267,6 @@ export function UpdateRangeDialog({
           />
         </div>
 
-        {/* Progress overlay while the commit is in flight. The preview
-            stays visible underneath but the user gets real feedback
-            on which phase the engine is in (cancel → optional buy →
-            place) and a 0-100 bar driven by polling /grid-state. */}
         {mutation.isPending && (
           <div className="rounded-md border border-primary/40 bg-primary-soft/30 p-3 space-y-2">
             <div className="flex items-center justify-between text-xs">
@@ -328,13 +285,11 @@ export function UpdateRangeDialog({
               />
             </div>
             <p className="text-2xs text-text-muted">
-              This usually takes 60-90 seconds. The monitor loop is
-              paused for this bot during the mutation.
+              {t('updateRange.progressNote')}
             </p>
           </div>
         )}
 
-        {/* Live preview area — switches between loading / error / plan / empty */}
         <PreviewArea
           plan={plan}
           fetching={previewQuery.isFetching}
@@ -346,8 +301,6 @@ export function UpdateRangeDialog({
   );
 }
 
-// ── Preview area ────────────────────────────────────────────────────
-
 interface PreviewAreaProps {
   plan: RangeUpdatePlan | null;
   fetching: boolean;
@@ -356,10 +309,11 @@ interface PreviewAreaProps {
 }
 
 function PreviewArea({ plan, fetching, error, formValid }: PreviewAreaProps) {
+  const t = useT();
   if (!formValid) {
     return (
       <div className="rounded-md border border-dashed border-border-subtle bg-bg-surface p-3 text-2xs text-text-muted text-center">
-        Enter a valid range to see the live preview
+        {t('updateRange.enterRange')}
       </div>
     );
   }
@@ -367,7 +321,7 @@ function PreviewArea({ plan, fetching, error, formValid }: PreviewAreaProps) {
     return (
       <div className="rounded-md border border-border-subtle bg-bg-surface p-3 text-xs text-text-muted flex items-center gap-2 justify-center">
         <Loader2 className="size-4 animate-spin" />
-        Calculating impact…
+        {t('updateRange.calculating')}
       </div>
     );
   }
@@ -376,7 +330,7 @@ function PreviewArea({ plan, fetching, error, formValid }: PreviewAreaProps) {
       <div className="flex items-start gap-2 p-3 rounded-md bg-danger-soft border border-danger/30">
         <AlertTriangle className="size-4 text-danger shrink-0 mt-0.5" />
         <div className="text-2xs text-danger-strong">
-          <strong>Preview failed:</strong> {error.message}
+          <strong>{t('updateRange.previewFailedPrefix')}</strong> {error.message}
         </div>
       </div>
     );
@@ -385,12 +339,11 @@ function PreviewArea({ plan, fetching, error, formValid }: PreviewAreaProps) {
 
   return (
     <div className="space-y-3">
-      {/* Server-side safety violations — block submit */}
       {plan.safetyViolations.length > 0 && (
         <div className="flex items-start gap-2 p-3 rounded-md bg-danger-soft border border-danger/30">
           <AlertTriangle className="size-4 text-danger shrink-0 mt-0.5" />
           <div className="text-2xs text-danger-strong space-y-1">
-            <div className="font-semibold">Cannot apply this range:</div>
+            <div className="font-semibold">{t('updateRange.cannotApplyTitle')}</div>
             <ul className="list-disc list-inside space-y-0.5">
               {plan.safetyViolations.map((v) => (
                 <li key={v}>{v}</li>
@@ -400,75 +353,72 @@ function PreviewArea({ plan, fetching, error, formValid }: PreviewAreaProps) {
         </div>
       )}
 
-      {/* No-op note */}
       {plan.noop && plan.safetyViolations.length === 0 && (
         <div className="rounded-md border border-border-subtle bg-bg-surface p-3 text-2xs text-text-muted text-center">
-          Range unchanged — nothing to apply
+          {t('updateRange.rangeUnchanged')}
         </div>
       )}
 
-      {/* The actual plan card — only render if there are no blocking issues */}
       {!plan.noop && plan.safetyViolations.length === 0 && (
         <div className="rounded-md border border-border-subtle bg-bg-surface p-3 space-y-3">
           <div className="text-2xs uppercase tracking-wider text-text-muted">
-            Preview · what will happen
+            {t('updateRange.previewTitle')}
           </div>
 
           <dl className="grid grid-cols-2 gap-y-1.5 gap-x-4 text-xs">
-            <dt className="text-text-muted">New range</dt>
+            <dt className="text-text-muted">{t('updateRange.newRange')}</dt>
             <dd className="text-right text-text-primary">
               <Mono>
                 {formatUsd(plan.newRange.lower)} — {formatUsd(plan.newRange.upper)}
               </Mono>
             </dd>
-            <dt className="text-text-muted">Total levels</dt>
+            <dt className="text-text-muted">{t('updateRange.totalLevels')}</dt>
             <dd className="text-right text-text-primary">
               <Mono>{plan.newTotalLevels}</Mono>
             </dd>
-            <dt className="text-text-muted">Spacing</dt>
+            <dt className="text-text-muted">{t('updateRange.spacing')}</dt>
             <dd className="text-right text-text-primary">
               <Mono>{formatUsd(plan.newSpacing)}</Mono>
             </dd>
-            <dt className="text-text-muted">Buy levels (below mark)</dt>
+            <dt className="text-text-muted">{t('updateRange.buyLevels')}</dt>
             <dd className="text-right text-success">
               <Mono>{plan.newBuyLevels}</Mono>
             </dd>
-            <dt className="text-text-muted">Sell levels (above mark)</dt>
+            <dt className="text-text-muted">{t('updateRange.sellLevels')}</dt>
             <dd className="text-right text-danger">
               <Mono>{plan.newSellLevels}</Mono>
             </dd>
-            <dt className="text-text-muted">Orders to cancel</dt>
+            <dt className="text-text-muted">{t('updateRange.ordersToCancel')}</dt>
             <dd className="text-right text-text-primary">
               <Mono>{plan.ordersToCancel}</Mono>
             </dd>
           </dl>
 
-          {/* Auto-buy callout — the part that costs real money */}
           {plan.autoBuy && (
             <div className="border-t border-border-subtle pt-3">
               <div className="text-2xs uppercase tracking-wider text-warning mb-1.5">
-                Will market-buy
+                {t('updateRange.willMarketBuy')}
               </div>
               <dl className="grid grid-cols-2 gap-y-1 gap-x-4 text-xs">
-                <dt className="text-text-muted">Size</dt>
+                <dt className="text-text-muted">{t('updateRange.autoBuySize')}</dt>
                 <dd className="text-right">
                   <Mono className="text-text-primary">
                     {plan.autoBuy.size.toFixed(4)} ETH
                   </Mono>
                 </dd>
-                <dt className="text-text-muted">At price</dt>
+                <dt className="text-text-muted">{t('updateRange.autoBuyAtPrice')}</dt>
                 <dd className="text-right">
                   <Mono className="text-text-primary">
                     ~{formatUsd(plan.autoBuy.estimatedPrice)}
                   </Mono>
                 </dd>
-                <dt className="text-text-muted">Total cost</dt>
+                <dt className="text-text-muted">{t('updateRange.autoBuyTotalCost')}</dt>
                 <dd className="text-right">
                   <Mono className="text-warning">
                     ~{formatUsd(plan.autoBuy.estimatedCost)}
                   </Mono>
                 </dd>
-                <dt className="text-text-muted">Slippage est.</dt>
+                <dt className="text-text-muted">{t('updateRange.autoBuySlippage')}</dt>
                 <dd className="text-right">
                   <Mono className="text-text-muted">
                     ~{formatUsd(plan.autoBuy.estimatedSlippageUsd)}
@@ -476,27 +426,21 @@ function PreviewArea({ plan, fetching, error, formValid }: PreviewAreaProps) {
                 </dd>
               </dl>
               <p className="text-2xs text-text-muted mt-2">
-                The grid needs more ETH to back the new sell levels. The
-                engine will market-buy this BEFORE placing any orders, with
-                IOC + 0.5% aggressive limit. Position will increase by this
-                amount.
+                {t('updateRange.autoBuyHelp')}
               </p>
             </div>
           )}
 
-          {/* Excess (informational, not an action) */}
           {plan.ethExcess > 0 && (
             <div className="border-t border-border-subtle pt-3 text-2xs text-text-muted">
-              Position currently exceeds the new sell-side requirement by{' '}
+              {t('updateRange.excessPrefix')}{' '}
               <Mono className="text-text-primary">
                 {plan.ethExcess.toFixed(4)} ETH
               </Mono>
-              . The grid will absorb it naturally as sells fill — no action
-              taken.
+              {t('updateRange.excessSuffix')}
             </div>
           )}
 
-          {/* Generic warnings (when not auto-buy / not excess) */}
           {plan.warnings.length > 0 && !plan.autoBuy && plan.ethExcess === 0 && (
             <div className="border-t border-border-subtle pt-3 text-2xs text-text-muted space-y-0.5">
               {plan.warnings.map((w) => (
@@ -506,8 +450,7 @@ function PreviewArea({ plan, fetching, error, formValid }: PreviewAreaProps) {
           )}
 
           <p className="text-2xs text-text-muted pt-2 border-t border-border-subtle">
-            The whole operation is real money and can take a few seconds.
-            Monitor loop is paused for this bot during the mutation.
+            {t('updateRange.operationNote')}
           </p>
         </div>
       )}
