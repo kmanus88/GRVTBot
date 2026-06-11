@@ -3,6 +3,19 @@
 
 import { vi, beforeAll, afterEach } from 'vitest';
 
+// Env vars must be set at module level, NOT inside beforeAll: client.ts
+// instantiates GRVTClient at import time and throws if they're missing,
+// and beforeAll only runs after the test file's imports resolve. Module
+// level in a setup file runs before any test file is imported. Without
+// these, the suite only passes when a populated .env happens to exist.
+// (match names used by order-signer.ts fallback path)
+process.env.GRVT_API_SECRET = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
+process.env.GRVT_TRADING_ADDRESS = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+process.env.GRVT_TRADING_ACCOUNT_ID = '1';
+// signToken() throws if JWT_SECRET is missing or < 32 chars — without it
+// every signup/login test that issues a token dies with a 500.
+process.env.JWT_SECRET = 'test-jwt-secret-0123456789abcdef0123456789abcdef';
+
 // Mock de GRVT Client
 export const mockGrvtClient = {
   getOpenOrders: vi.fn(),
@@ -45,11 +58,6 @@ const mockConsole = {
 beforeAll(() => {
   // Replace console
   global.console = mockConsole as any;
-  
-  // Mock environment variables (match names used by order-signer.ts fallback path)
-  process.env.GRVT_API_SECRET = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-  process.env.GRVT_TRADING_ADDRESS = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
-  process.env.GRVT_TRADING_ACCOUNT_ID = '1';
 });
 
 afterEach(() => {

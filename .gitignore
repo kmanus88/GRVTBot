@@ -25,6 +25,11 @@ data/*.db-*
 **/data/*.db-wal
 **/data/*.db-shm
 **/data/grid_bot.*
+# AES-256-GCM master key for encrypted GRVT credentials. Docker setups
+# keep it at ./data/master.key (mounted into the container) instead of
+# /etc/grvt-grid/ — committing it would hand every user's API keys to
+# anyone with repo access.
+**/data/master.key
 *.bak
 
 # Local-only memory + planning (never share)

@@ -1303,8 +1303,33 @@ export class GridBotDB {
 
   /**
    * Crear snapshot diario
+   *
+   * Fresh installs create daily_snapshots with only the new schema;
+   * pre-monorepo DBs migrated via ALTER also carry the legacy columns
+   * (timestamp NOT NULL + *_usdt mirrors), so the write set must match
+   * what the table actually has. Probed once, cached for the process.
    */
+  private snapshotHasLegacyCols?: boolean;
+
   async createDailySnapshot(params: Omit<DailySnapshot, 'id' | 'created_at'>): Promise<number> {
+    if (this.snapshotHasLegacyCols === undefined) {
+      const cols = (await this.dbAll(`PRAGMA table_info(daily_snapshots)`)) as { name: string }[];
+      this.snapshotHasLegacyCols = cols.some((c) => c.name === 'timestamp');
+    }
+
+    if (!this.snapshotHasLegacyCols) {
+      const result = await this.dbRun(`
+        INSERT OR REPLACE INTO daily_snapshots
+        (bot_id, date, equity, grid_profit_net, trend_pnl, total_pnl, round_trips, eth_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        params.bot_id, params.date,
+        params.equity, params.grid_profit_net, params.trend_pnl,
+        params.total_pnl, params.round_trips, params.eth_price,
+      ]);
+      return result.lastID!;
+    }
+
     const ts = new Date(params.date + 'T00:00:00Z').toISOString();
     const result = await this.dbRun(`
       INSERT OR REPLACE INTO daily_snapshots
