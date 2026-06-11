@@ -159,6 +159,85 @@ describe('GridBotDB migrations (D.6)', () => {
     expect(row?.quantity_per_level).toBe(0.04);
   });
 
+  it('createDailySnapshot persists a row on a fresh-schema DB', async () => {
+    // Regression: the INSERT used to name legacy columns (timestamp,
+    // balance_usdt, ...) that only exist on migrated pre-monorepo DBs,
+    // so every nightly snapshot failed with SQLITE_ERROR on fresh
+    // installs and the equity curve stayed empty forever.
+    const db = await makeDb();
+    await priv(db).dbRun(`
+      INSERT INTO grid_bots (pair, direction, leverage, lower_price, upper_price,
+        num_grids, investment_usdt, status)
+      VALUES ('BNB_USDT_Perp', 'long', 3, 560, 700, 10, 60, 'running')
+    `);
+
+    await db.createDailySnapshot({
+      bot_id: 1,
+      date: '2026-06-11',
+      equity: 59.32,
+      grid_profit_net: 1.49,
+      trend_pnl: -2.17,
+      total_pnl: -0.68,
+      round_trips: 4,
+      eth_price: 596.69,
+    });
+
+    const rows = await db.getDailySnapshotsByBot(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].date).toBe('2026-06-11');
+    expect(rows[0].equity).toBe(59.32);
+    expect(rows[0].round_trips).toBe(4);
+  });
+
+  it('createDailySnapshot persists a row on a legacy-schema DB', async () => {
+    // Legacy DBs (pre-monorepo bot v1) have the old column set, with
+    // timestamp NOT NULL — the write must keep populating those so the
+    // same code serves both schema generations.
+    const db = new GridBotDB(':memory:');
+    await priv(db).dbRun(`
+      CREATE TABLE daily_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id INTEGER NOT NULL,
+        timestamp DATETIME NOT NULL,
+        balance_usdt REAL NOT NULL,
+        equity_usdt REAL NOT NULL,
+        grid_profit_usdt REAL NOT NULL,
+        trend_pnl_usdt REAL NOT NULL,
+        total_pnl_usdt REAL NOT NULL,
+        num_round_trips INTEGER DEFAULT 0,
+        position_size REAL DEFAULT 0,
+        drawdown_pct REAL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(bot_id, timestamp)
+      )
+    `);
+    await db.initialize(); // runs the ALTERs that add the new columns
+    await priv(db).dbRun(`
+      INSERT INTO grid_bots (pair, direction, leverage, lower_price, upper_price,
+        num_grids, investment_usdt, status)
+      VALUES ('ETH_USDT_Perp', 'long', 2, 1800, 2400, 10, 750, 'running')
+    `);
+
+    await db.createDailySnapshot({
+      bot_id: 1,
+      date: '2026-06-11',
+      equity: 812.5,
+      grid_profit_net: 53.1,
+      trend_pnl: 9.4,
+      total_pnl: 62.5,
+      round_trips: 120,
+      eth_price: 2210,
+    });
+
+    const rows = await db.getDailySnapshotsByBot(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].equity).toBe(812.5);
+    // Legacy mirror columns stay in sync for old readers
+    const raw = await priv(db).dbGet(`SELECT timestamp, equity_usdt FROM daily_snapshots WHERE bot_id = 1`);
+    expect(raw?.equity_usdt).toBe(812.5);
+    expect(raw?.timestamp).toBe('2026-06-11T00:00:00.000Z');
+  });
+
   it('does NOT overwrite original_investment_usdt for rows that already have it', async () => {
     const db = await makeDb();
 
